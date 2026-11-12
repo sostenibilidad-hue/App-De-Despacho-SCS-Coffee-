@@ -61,6 +61,8 @@
     '.csc-overlay{display:none;position:fixed;inset:0;background:rgba(61,36,18,.5);z-index:250;}',
     '.csc-overlay.show{display:block;}',
     '@media (min-width:900px){.floating-back{display:none !important;}}',
+    /* Saludo y hora a la derecha (junto a la campana) para que el menú abierto no los tape */
+    '@media (min-width:900px){#appScreen .app-header .greeting{text-align:right;}}',
     '@media (max-width:899px){',
     '  .csc-slot{width:0;}',
     '  .csc-side{width:282px;max-width:86vw;transform:translateX(-100%);transition:transform .25s ease;box-shadow:8px 0 30px rgba(0,0,0,.3);}',

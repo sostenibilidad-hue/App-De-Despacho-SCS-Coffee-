@@ -1,7 +1,7 @@
 // ============================================================
 // CONFIGURACIÓN
 // ============================================================
-const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbyOj8_v6R0NVazd-ASdhELKzs1kIaGiNLmTXlN_c8YTfNU_FBddGw7c4X5MjsBskJA/exec';
+const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzLRh4HAOBdXJUs1sxWgS42vd3hI0pqbo_6Xhj3ifFwYTRmAn2E2OMpT-AtEiJWvdDeAg/exec';
 
 const GROUP_LABELS = { datos: 'Datos' };
 

@@ -276,6 +276,18 @@
   .app-header-left .logo-badge{ width:52px; height:52px; border-radius:13px; margin:0; box-shadow: 0 4px 12px rgba(0,0,0,0.18); background: #fff; padding:8px; }
 
   .app-header-titles h1{ margin:0; font-size:18.5px; font-weight:700; }
+
+  /* Logo grande sobre fondo blanco; el texto pasa a segundo plano */
+  .app-header-left{ flex-direction:column; align-items:flex-start; gap:8px; }
+  .logo-wide{
+    background:#fff; border-radius:14px; padding:7px 14px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.22); line-height:0;
+  }
+  .logo-wide img{ display:block; height:46px; width:auto; max-width:100%; }
+  .app-header-titles h1{
+    font-size:12px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
+    color:#E9D5BC; margin-left:4px;
+  }
   .header-actions{ display:flex; align-items:center; gap:8px; }
   .icon-btn{
     background: rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.2); color:#fff;
@@ -336,8 +348,8 @@
     .app-header{ padding: 18px 16px 40px; }
     .app-header-inner{ flex-direction: column; align-items: stretch; gap:14px; }
     .app-header-left{ flex-direction: column; align-items: flex-start; gap:10px; }
-    .app-header-left .logo-badge{ width:44px; height:44px; border-radius:12px; }
-    .app-header-titles h1{ font-size:16.5px; line-height:1.3; }
+    .logo-wide img{ height:42px; }
+    .app-header-titles h1{ font-size:11.5px; line-height:1.3; }
     .header-actions{ width:100%; justify-content:flex-end; }
     .greeting h2{ font-size:17px; }
   }
@@ -589,8 +601,9 @@
     main.container{ max-width: 1180px; }
 
     .app-header{ padding: 30px 32px 56px; }
-    .app-header-left .logo-badge{ width:60px; height:60px; border-radius:15px; padding:9px; }
-    .app-header-titles h1{ font-size:24px; }
+    .logo-wide{ padding:9px 18px; border-radius:16px; }
+    .logo-wide img{ height:64px; }
+    .app-header-titles h1{ font-size:14px; }
     .greeting h2{ font-size:25px; }
     .greeting .clock-line{ font-size:14px; }
     .icon-btn{ font-size:14px; padding:10px 14px; }
@@ -767,10 +780,10 @@
 
 <!-- ============ APP ============ -->
 <div id="appScreen">
-  <header class="app-header">
+  <header class="app-header" id="appHeader">
     <div class="app-header-inner">
       <div class="app-header-left">
-        <div class="logo-badge"><img id="headerBadgeImg" src="" alt="CSC Coffee"></div>
+        <div class="logo-wide"><img id="headerBadgeImg" src="" alt="CSC Coffee and Softs Company S.A.S."></div>
         <div class="app-header-titles">
           <h1>Sistema de Reportes</h1>
         </div>
@@ -925,7 +938,7 @@
     var header = document.getElementById('headerBadgeImg');
     var boot   = document.getElementById('bootLogoImg');
     var banner = document.getElementById('brandBannerImg');
-    if (header) header.src = window.CSC_LOGOS.squared;
+    if (header) header.src = window.CSC_LOGOS.wide;
     if (boot)   boot.src   = window.CSC_LOGOS.squared;
     if (banner) banner.src = window.CSC_LOGOS.wide;
   });

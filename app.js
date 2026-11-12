@@ -40,6 +40,329 @@ async function fetchJson(url, options, attempts) {
   );
 }
 
+/* ------------------------- CACHÉ LOCAL (6 HORAS) -------------------------
+ * Los reportes, la lista de "sin fotos", las fotos de cada reporte y los
+ * enlaces de documentos se guardan en el navegador por 6 horas. Así la app
+ * abre al instante, sin esperar al servidor. Lo que el propio usuario
+ * guarda/edita/borra se refleja en la caché al momento. Para traer cambios
+ * de otras personas antes de las 6 horas está el botón ↻ "Actualizar". */
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const CACHE_PREFIX = 'csc_cache_v2:';
+const GROUP = 'datos';
+
+function cacheGet(key) {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || typeof o.t !== 'number' || Date.now() - o.t > CACHE_TTL_MS) {
+      localStorage.removeItem(CACHE_PREFIX + key);
+      return null;
+    }
+    return o;
+  } catch (e) { return null; }
+}
+
+function cacheSet(key, data, t) {
+  const payload = JSON.stringify({ t: t || Date.now(), d: data });
+  try { localStorage.setItem(CACHE_PREFIX + key, payload); }
+  catch (e) {
+    // Cuota llena: se borran las cachés pequeñas (fotos/documentos) y se reintenta una vez.
+    cacheClear('imgs:'); cacheClear('doc:');
+    try { localStorage.setItem(CACHE_PREFIX + key, payload); } catch (e2) { /* sin caché esta vez */ }
+  }
+}
+
+function cacheRemove(key) { try { localStorage.removeItem(CACHE_PREFIX + key); } catch (e) {} }
+
+/** Borra todas las entradas que empiecen por `prefix` (o toda la caché si va vacío). */
+function cacheClear(prefix) {
+  try {
+    const start = CACHE_PREFIX + (prefix || '');
+    const toDelete = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.indexOf(start) === 0) toDelete.push(k);
+    }
+    toDelete.forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+}
+
+let dataSyncedAt = 0;
+let syncInFlight = null;
+
+function dataIsFresh() {
+  return !!recordsCache[GROUP] && (Date.now() - dataSyncedAt) < CACHE_TTL_MS;
+}
+
+function applyData(records, pending, t) {
+  recordsCache[GROUP] = records;
+  pendingPhotosCache[GROUP] = (pending || []).map(p => Object.assign({ group: GROUP }, p));
+  dataSyncedAt = t;
+}
+
+/** Guarda en el navegador el estado actual (después de cambios locales). */
+function persistData() {
+  if (!recordsCache[GROUP]) return;
+  cacheSet('records', recordsCache[GROUP], dataSyncedAt);
+  cacheSet('pending', pendingPhotosCache[GROUP], dataSyncedAt);
+}
+
+/** Deja en memoria los reportes y pendientes. Usa la caché si tiene menos de
+ *  6 horas (sin tocar la red); con force=true va al servidor saltándose todas
+ *  las cachés. Una sola llamada ("init") trae reportes + pendientes. */
+async function syncData(force) {
+  if (!force) {
+    if (dataIsFresh()) return;
+    const rec = cacheGet('records'), pen = cacheGet('pending');
+    if (rec && pen) { applyData(rec.d, pen.d, Math.min(rec.t, pen.t)); return; }
+    if (syncInFlight) return syncInFlight;
+  } else if (syncInFlight) {
+    try { await syncInFlight; } catch (e) {}
+  }
+
+  syncInFlight = (async () => {
+    try {
+      const q = force ? '&fresh=1' : '';
+      let records, pending;
+      const init = await fetchJson(WEB_APP_URL + '?action=init' + q);
+      if (init.ok) {
+        records = init.records; pending = init.pending;
+      } else if (String(init.error || '').indexOf('Acción no reconocida') !== -1) {
+        // Backend antiguo (aún sin "init"): se piden las dos cosas por separado.
+        const a = await fetchJson(WEB_APP_URL + '?action=list&group=' + GROUP + q);
+        const b = await fetchJson(WEB_APP_URL + '?action=pendingPhotos&group=' + GROUP + q);
+        if (!a.ok) throw new Error(a.error || 'Error desconocido');
+        records = a.records; pending = b.ok ? b.pending : [];
+      } else {
+        throw new Error(init.error || 'Error desconocido');
+      }
+      if (force) { cacheClear('imgs:'); cacheClear('doc:'); }
+      applyData(records, pending, Date.now());
+      persistData();
+    } finally { syncInFlight = null; }
+  })();
+  return syncInFlight;
+}
+
+/** Fotos de un reporte: caché de 6 h; si no hay, se piden al servidor. */
+async function getReportImages(reportId, force) {
+  const key = 'imgs:' + reportId;
+  if (!force) { const c = cacheGet(key); if (c) return c.d; }
+  const data = await fetchJson(WEB_APP_URL + '?action=listImages&group=' + GROUP + '&reportId=' + encodeURIComponent(reportId) + (force ? '&fresh=1' : ''));
+  if (!data.ok) throw new Error(data.error || 'Error desconocido');
+  cacheSet(key, data.images);
+  return data.images;
+}
+
+/** Siguiente número de foto (NN del nombre del archivo), si se conocen las ya subidas. */
+function nextSeqFor(reportId) {
+  const c = cacheGet('imgs:' + reportId);
+  if (!c) return null;
+  let max = 0;
+  c.d.forEach(im => {
+    const m = /_(\d{1,3})\.[A-Za-z0-9]+$/.exec(im.name || '');
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  return max + 1;
+}
+
+/* --- Cambios locales: la caché se mantiene al día sin volver al servidor --- */
+
+function pendingItemFor(rec) {
+  return {
+    group: GROUP,
+    id: rec['Id_Reporte'],
+    placa: rec['Placa Del Vehiculo '] || '',
+    fecha: rec['Fecha '] || '',
+    responsable: rec['Nom: Del Respnsable del Despacho '] || ''
+  };
+}
+
+function setReportPending(reportId, isPending) {
+  const list = pendingPhotosCache[GROUP] || [];
+  const idx = list.findIndex(p => String(p.id) === String(reportId));
+  if (isPending && idx === -1) {
+    const rec = (recordsCache[GROUP] || []).find(r => String(r['Id_Reporte']) === String(reportId));
+    if (rec) list.unshift(pendingItemFor(rec));
+  } else if (!isPending && idx !== -1) {
+    list.splice(idx, 1);
+  }
+  pendingPhotosCache[GROUP] = list;
+}
+
+function addLocalRecord(rec, willHavePhotos) {
+  if (!recordsCache[GROUP]) return; // aún no se ha cargado nada: la próxima carga lo traerá
+  recordsCache[GROUP].unshift(rec);
+  if (!willHavePhotos) setReportPending(rec['Id_Reporte'], true);
+  persistData();
+  renderPendingUI();
+}
+
+function updateLocalRecord(id, fields, willHavePhotos) {
+  const rec = (recordsCache[GROUP] || []).find(r => String(r['Id_Reporte']) === String(id));
+  if (rec) Object.assign(rec, fields);
+  const pend = (pendingPhotosCache[GROUP] || []).find(p => String(p.id) === String(id));
+  if (pend && rec) Object.assign(pend, pendingItemFor(rec));
+  if (willHavePhotos) setReportPending(id, false);
+  persistData();
+  renderPendingUI();
+}
+
+function removeLocalRecord(id) {
+  if (recordsCache[GROUP]) {
+    recordsCache[GROUP] = recordsCache[GROUP].filter(r => String(r['Id_Reporte']) !== String(id));
+  }
+  setReportPending(id, false);
+  cacheRemove('imgs:' + id);
+  persistData();
+}
+
+function updateHubCount() {
+  const el = document.getElementById('countDatos');
+  if (el && recordsCache[GROUP]) el.textContent = recordsCache[GROUP].length;
+}
+
+function updateCacheInfo() {
+  const el = document.getElementById('cacheInfo');
+  if (!el) return;
+  el.textContent = dataSyncedAt
+    ? 'Datos al ' + new Date(dataSyncedAt).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }) + ' · se renuevan solos cada 6 h'
+    : '';
+}
+
+/* ------------------------- SUBIDA DE FOTOS EN SEGUNDO PLANO -------------------------
+ * Guardar un reporte ahora envía primero SOLO los datos (rápido) y deja libre
+ * el formulario. Las fotos suben después, 3 a la vez, mostrando el avance
+ * abajo. Si alguna falla se reintenta sola y, si aun así no sube, aparece
+ * un aviso con botón "Reintentar". */
+const PHOTO_CONCURRENCY = 3;
+const photoQueue = [];
+const uploadedByReport = {};
+let photoActive = 0;
+let photoRetrying = 0;
+let uploadStats = { total: 0, done: 0, failed: [] };
+let toastTimer = null;
+
+function uploadsPending() {
+  return photoActive > 0 || photoQueue.length > 0 || photoRetrying > 0 || uploadStats.failed.length > 0;
+}
+
+function enqueuePhotos(reportId, meta, files, startSeq) {
+  files.forEach((file, i) => {
+    photoQueue.push({ reportId, meta, file, seq: startSeq != null ? startSeq + i : null, attempts: 0, tried: false });
+  });
+  uploadStats.total += files.length;
+  clearTimeout(toastTimer);
+  renderUploadToast();
+  pumpPhotos();
+}
+
+function pumpPhotos() {
+  while (photoActive < PHOTO_CONCURRENCY && photoQueue.length) {
+    const task = photoQueue.shift();
+    photoActive++;
+    uploadPhotoTask(task).finally(() => { photoActive--; pumpPhotos(); });
+  }
+  if (!photoActive && !photoQueue.length && !photoRetrying) finishUploads();
+}
+
+async function uploadPhotoTask(task) {
+  try {
+    const body = { action: 'addImage', group: GROUP, reportId: task.reportId, file: task.file, meta: task.meta };
+    // El número NN solo se usa en el primer intento; en reintentos el servidor
+    // pone un sufijo único, para no duplicar nombres si el 1.º sí había llegado.
+    if (task.seq != null && !task.tried) body.seq = task.seq;
+    task.tried = true;
+    const res = await fetch(WEB_APP_URL, { method: 'POST', body: JSON.stringify(body) });
+    if (!res.ok) throw new Error('estado ' + res.status);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Error desconocido');
+    uploadStats.done++;
+    cacheRemove('imgs:' + task.reportId);
+    uploadedByReport[task.reportId] = (uploadedByReport[task.reportId] || 0) + 1;
+    setReportPending(task.reportId, false);
+    persistData();
+  } catch (err) {
+    task.attempts++;
+    if (task.attempts < 3) {
+      photoRetrying++;
+      setTimeout(() => { photoRetrying--; photoQueue.push(task); pumpPhotos(); }, 900 * task.attempts);
+    } else {
+      uploadStats.failed.push(task);
+    }
+  }
+  renderUploadToast();
+}
+
+function finishUploads() {
+  // Reportes que quedaron sin NINGUNA foto subida vuelven a la campana.
+  const ids = {};
+  uploadStats.failed.forEach(t => { ids[t.reportId] = true; });
+  Object.keys(ids).forEach(id => { if (!uploadedByReport[id]) setReportPending(id, true); });
+  persistData();
+  renderPendingUI();
+  renderUploadToast();
+  if (!uploadStats.failed.length) {
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      if (!uploadsPending()) { uploadStats = { total: 0, done: 0, failed: [] }; renderUploadToast(); }
+    }, 2500);
+  }
+}
+
+function retryFailedPhotos() {
+  const failed = uploadStats.failed;
+  uploadStats.failed = [];
+  failed.forEach(t => { t.attempts = 0; photoQueue.push(t); });
+  renderUploadToast();
+  pumpPhotos();
+}
+
+function discardFailedPhotos() {
+  uploadStats = { total: 0, done: 0, failed: [] };
+  renderUploadToast();
+}
+
+function renderUploadToast() {
+  const el = document.getElementById('uploadToast');
+  if (!el) return;
+  const { total, done, failed } = uploadStats;
+  if (!total) { el.className = 'upload-toast'; el.innerHTML = ''; return; }
+  const settled = !photoActive && !photoQueue.length && !photoRetrying;
+  if (failed.length && settled) {
+    el.className = 'upload-toast show err';
+    el.innerHTML =
+      '<div class="ut-text">⚠ ' + failed.length + ' foto(s) no se pudieron subir.</div>' +
+      '<div class="ut-actions"><button type="button" id="utRetry">Reintentar</button><button type="button" id="utDiscard" class="ghost">Descartar</button></div>';
+    document.getElementById('utRetry').addEventListener('click', retryFailedPhotos);
+    document.getElementById('utDiscard').addEventListener('click', discardFailedPhotos);
+  } else if (settled) {
+    el.className = 'upload-toast show ok';
+    el.innerHTML = '<div class="ut-text">✓ ' + done + ' foto(s) subidas correctamente.</div>';
+  } else {
+    const pct = Math.round(((done + failed.length) / total) * 100);
+    el.className = 'upload-toast show';
+    el.innerHTML =
+      '<div class="ut-text"><span class="spinner dark"></span>Subiendo fotos… ' + done + ' de ' + total + '</div>' +
+      '<div class="ut-bar"><div class="ut-bar-fill" style="width:' + pct + '%"></div></div>';
+  }
+}
+
+/** Ejecuta fn sobre cada elemento con máximo `limit` a la vez; conserva el orden. */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   if (!WEB_APP_URL || WEB_APP_URL.indexOf('PON_AQUI') !== -1) {
     document.getElementById('configWarning').style.display = 'block';
@@ -51,6 +374,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setupApp();
   setupNotifBell();
   setupUnsavedChangesWarning();
+  const refreshBtn = document.getElementById('refreshBtn');
+  if (refreshBtn) refreshBtn.addEventListener('click', forceRefresh);
 
   const saved = localStorage.getItem('csc_user');
   if (saved) {
@@ -89,7 +414,7 @@ function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
  * o no según haya cambios pendientes. */
 function setupUnsavedChangesWarning() {
   window.addEventListener('beforeunload', (e) => {
-    if (!formDirty) return;
+    if (!formDirty && !uploadsPending()) return;
     e.preventDefault();
     e.returnValue = ''; // requerido por algunos navegadores para mostrar el aviso
   });
@@ -316,6 +641,8 @@ function logout() {
   currentUser = null;
   recordsCache = { datos: null };
   pendingPhotosCache = { datos: [] };
+  dataSyncedAt = 0;
+  cacheClear(); // equipo compartido: al salir no queda información en el navegador
   renderNotifBadge();
   const notifPanel = document.getElementById('notifPanel');
   if (notifPanel) notifPanel.classList.remove('open');
@@ -360,6 +687,7 @@ function setupApp() {
       const exportBtnEl = document.getElementById('exportCsvBtn');
       if (tab.dataset.tab === 'gallery') {
         loadGallery();
+        loadExcelJs().catch(() => {}); // se precarga en silencio para que "Exportar" sea inmediato
         if (exportBtnEl) exportBtnEl.classList.remove('is-hidden');
       } else if (exportBtnEl) {
         exportBtnEl.classList.add('is-hidden');
@@ -387,15 +715,17 @@ function setupApp() {
     // una foto"). Ahora se puede tocar varias veces (o elegir varias de
     // una sola vez desde la galería) y todas se van sumando, sin límite.
     const label = document.getElementById('extraFileLabel');
-    const totalNuevas = extraFiles.files.length;
-    let i = 0;
-    for (const file of extraFiles.files) {
-      i++;
-      if (totalNuevas > 1) label.textContent = 'Optimizando foto ' + i + ' de ' + totalNuevas + '…';
-      const fileData = await compressImageFile(file);
-      addExtraFile(fileData);
-    }
+    const nuevas = Array.from(extraFiles.files);
     extraFiles.value = ''; // limpia el input para poder volver a elegir/tomar más fotos
+    let hechas = 0;
+    // Se optimizan 3 fotos a la vez (antes era una por una): mucho más rápido.
+    const listas = await mapLimit(nuevas, 3, async (file) => {
+      const fileData = await compressImageFile(file);
+      hechas++;
+      if (nuevas.length > 1) label.textContent = 'Optimizando fotos… ' + hechas + ' de ' + nuevas.length;
+      return fileData;
+    });
+    listas.forEach(addExtraFile);
     updateExtraFilesUI();
   });
 
@@ -404,7 +734,7 @@ function setupApp() {
   document.getElementById('gallerySearch').addEventListener('input', renderGallery);
 
   const exportBtn = document.getElementById('exportCsvBtn');
-  if (exportBtn) exportBtn.addEventListener('click', exportGalleryCSV);
+  if (exportBtn) exportBtn.addEventListener('click', exportGalleryExcel);
 
   // Cualquier cambio en los campos del reporte (o en los archivos) marca
   // el formulario como "con cambios sin guardar", para el aviso al salir.
@@ -487,37 +817,23 @@ function openGroup(group) {
 }
 
 async function refreshHubCounts() {
-  ['datos'].forEach(async (group) => {
-    try {
-      const data = await fetchJson(WEB_APP_URL + '?action=list&group=' + group);
-      if (data.ok) {
-        recordsCache[group] = data.records;
-        const el = document.getElementById('countDatos');
-        if (el) el.textContent = data.records.length;
-      }
-    } catch (e) { /* silencioso: el contador simplemente no se actualiza esta vez */ }
-  });
-  refreshPendingBadge();
+  try { await syncData(false); } catch (e) { /* silencioso: el contador simplemente no se actualiza esta vez */ }
+  updateHubCount();
+  renderPendingUI();
 }
 
 /* ------------------------- CAMPANA: REPORTES SIN FOTOS ------------------------- */
 
 let pendingPhotosCache = { datos: [] };
 
-/* Pide al backend, por cada grupo, la lista de reportes que todavía no
- * tienen ninguna foto adicional cargada, y actualiza la campana. Se llama
- * al entrar a la app y después de cualquier acción que pueda cambiar el
- * estado de fotos de un reporte (guardar, borrar reporte, borrar foto). */
-async function refreshPendingBadge() {
-  const groups = Object.keys(GROUP_LABELS);
-  for (const group of groups) {
-    try {
-      const data = await fetchJson(WEB_APP_URL + '?action=pendingPhotos&group=' + group);
-      if (data.ok) {
-        pendingPhotosCache[group] = data.pending.map(p => Object.assign({ group }, p));
-      }
-    } catch (e) { /* silencioso: la campana simplemente no se actualiza esta vez */ }
-  }
+/* Repinta la campana, el panel y la galería con lo que hay en memoria (sin
+ * pedir nada al servidor). Con force=true primero trae todo de nuevo. */
+async function refreshPendingBadge(force) {
+  if (force) { try { await syncData(true); } catch (e) {} }
+  renderPendingUI();
+}
+
+function renderPendingUI() {
   renderNotifBadge();
   // Si el panel está abierto mientras se refresca (p.ej. tras subir una
   // foto), se vuelve a pintar para que no quede desactualizado en pantalla.
@@ -528,6 +844,22 @@ async function refreshPendingBadge() {
   const galleryPanel = document.getElementById('panel-gallery');
   if (currentGroup && galleryPanel && galleryPanel.classList.contains('active') && recordsCache[currentGroup]) {
     renderGallery();
+  }
+}
+
+/* Botón ↻: trae todo de nuevo desde el servidor (cambios de otras personas). */
+async function forceRefresh() {
+  const btn = document.getElementById('refreshBtn');
+  if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
+  try {
+    await syncData(true);
+    updateHubCount();
+    renderPendingUI();
+    if (currentGroup) renderGallery();
+  } catch (err) {
+    window.alert('No se pudo actualizar: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove('spinning'); }
   }
 }
 
@@ -677,8 +1009,8 @@ function fileToBase64(file) {
  * normalmente entre 150–400 KB, sin pérdida de calidad visible para un
  * reporte de despacho. PDFs y GIFs se suben tal cual, sin tocar. */
 function compressImageFile(file, maxDim, quality) {
-  maxDim = maxDim || 1600;
-  quality = quality || 0.72;
+  maxDim = maxDim || 1400;
+  quality = quality || 0.7;
   return new Promise((resolve, reject) => {
     const uploadAsIs = () => fileToBase64(file)
       .then(base64 => resolve({ base64, mimeType: file.type, filename: file.name }))
@@ -775,9 +1107,11 @@ async function onSubmit(e) {
     };
 
     const isEdit = !!editingId;
+    const photos = extraFilesData.slice(); // las fotos suben aparte, en segundo plano
+    // Solo viajan los DATOS (+ documento anexo): la petición es pequeña y rápida.
     const payload = isEdit
-      ? { action: 'update', group: currentGroup, id: editingId, fields, images: extraFilesData }
-      : { action: 'create', group: currentGroup, fields, file: mainFileData, images: extraFilesData };
+      ? { action: 'update', group: currentGroup, id: editingId, fields }
+      : { action: 'create', group: currentGroup, fields, file: mainFileData };
 
     // IMPORTANTE: a propósito este envío NO usa fetchJson() (que reintenta
     // automáticamente). Guardar un reporte no es una operación segura de
@@ -791,11 +1125,30 @@ async function onSubmit(e) {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || 'Error desconocido');
 
+    const reportId = isEdit ? editingId : data.result.id;
+    const meta = { lotes: lotes, placa: placa.toUpperCase() };
+    const startSeq = isEdit ? nextSeqFor(reportId) : 1;
+
+    // La caché local se actualiza al instante (sin volver a pedir la lista).
+    if (isEdit) {
+      updateLocalRecord(reportId, fields, photos.length > 0);
+    } else {
+      addLocalRecord({
+        'Id_Reporte': reportId,
+        'Fecha ': fecha,
+        'Placa Del Vehiculo ': fields['Placa Del Vehiculo '],
+        'Numero De Lotes ': lotes,
+        'Nom: Del Respnsable del Despacho ': responsable,
+        'Documentos Anexos': (data.result && data.result.mainFilePath) || ''
+      }, photos.length > 0);
+    }
+    if (photos.length) enqueuePhotos(reportId, meta, photos, startSeq);
+
     statusEl.className = 'status ok';
-    statusEl.textContent = isEdit ? 'Reporte actualizado correctamente.' : 'Reporte guardado correctamente.';
+    statusEl.textContent = (isEdit ? 'Reporte actualizado correctamente.' : 'Reporte guardado correctamente.') +
+      (photos.length ? ' Las fotos se están subiendo…' : '');
     resetForm();
-    recordsCache[currentGroup] = null;
-    refreshPendingBadge(); // el reporte pudo dejar de estar "pendiente de fotos"
+    updateHubCount();
   } catch (err) {
     statusEl.className = 'status err';
     statusEl.textContent = 'No se pudo guardar: ' + err.message;
@@ -899,12 +1252,11 @@ function closeLightbox() {
 
 async function loadGallery() {
   const listEl = document.getElementById('galleryList');
-  if (recordsCache[currentGroup]) { renderGallery(); return; }
-  listEl.innerHTML = '<div class="loading"><span class="spinner dark"></span>Cargando reportes…</div>';
+  // Con caché (memoria o navegador, menos de 6 h) se muestra al instante.
+  const hasLocal = dataIsFresh() || (cacheGet('records') && cacheGet('pending'));
+  if (!hasLocal) listEl.innerHTML = '<div class="loading"><span class="spinner dark"></span>Cargando reportes…</div>';
   try {
-    const data = await fetchJson(WEB_APP_URL + '?action=list&group=' + currentGroup);
-    if (!data.ok) throw new Error(data.error || 'Error desconocido');
-    recordsCache[currentGroup] = data.records;
+    await syncData(false);
     renderGallery();
   } catch (err) {
     listEl.innerHTML =
@@ -914,6 +1266,7 @@ async function loadGallery() {
 }
 
 function renderGallery() {
+  updateCacheInfo();
   const records = recordsCache[currentGroup] || [];
   const query = document.getElementById('gallerySearch').value.trim().toLowerCase();
   const listEl = document.getElementById('galleryList');
@@ -923,7 +1276,8 @@ function renderGallery() {
     const placa = String(r['Placa Del Vehiculo '] || '').toLowerCase();
     const resp = String(r['Nom: Del Respnsable del Despacho '] || '').toLowerCase();
     const lotes = String(r['Numero De Lotes '] || '').toLowerCase();
-    return placa.indexOf(query) !== -1 || resp.indexOf(query) !== -1 || lotes.indexOf(query) !== -1;
+    const codigo = String(r['Id_Reporte'] || '').toLowerCase();
+    return placa.indexOf(query) !== -1 || resp.indexOf(query) !== -1 || lotes.indexOf(query) !== -1 || codigo.indexOf(query) !== -1;
   });
 
   if (!filtered.length) {
@@ -1002,29 +1356,227 @@ function friendlyLabel(key) {
   return clean.charAt(0).toUpperCase() + clean.slice(1);
 }
 
-/* ------------------------- EXPORTAR A EXCEL/CSV ------------------------- */
+/* ------------------------- EXPORTAR A EXCEL ------------------------- */
 
-/* Descarga un .csv (se abre directo en Excel) con los reportes que están
- * actualmente visibles en "Registros guardados" — es decir, respeta el
- * texto que se haya escrito en el buscador. Incluye primero los 4 campos
- * principales y luego cualquier otra columna que exista en la hoja, para
- * que el reporte gerencial nunca se quede corto de información. */
-function exportGalleryCSV() {
+const EXCELJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+let excelJsPromise = null;
+
+/* Carga ExcelJS solo cuando hace falta (al abrir "Registros guardados"), para
+ * no alargar el arranque de la app. */
+function loadExcelJs() {
+  if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+  if (excelJsPromise) return excelJsPromise;
+  excelJsPromise = new Promise((resolve, reject) => {
+    const sc = document.createElement('script');
+    sc.src = EXCELJS_URL;
+    sc.onload = () => window.ExcelJS ? resolve(window.ExcelJS) : reject(new Error('ExcelJS no disponible'));
+    sc.onerror = () => reject(new Error('No se pudo cargar el generador de Excel'));
+    document.head.appendChild(sc);
+  }).catch(err => { excelJsPromise = null; throw err; });
+  return excelJsPromise;
+}
+
+/* Reportes visibles según el buscador de "Registros guardados". */
+function getFilteredRecords() {
   const records = recordsCache[currentGroup] || [];
   const query = document.getElementById('gallerySearch').value.trim().toLowerCase();
-
-  const filtered = records.filter(r => {
+  return records.filter(r => {
     if (!query) return true;
     const placa = String(r['Placa Del Vehiculo '] || '').toLowerCase();
     const resp = String(r['Nom: Del Respnsable del Despacho '] || '').toLowerCase();
     const lotes = String(r['Numero De Lotes '] || '').toLowerCase();
-    return placa.indexOf(query) !== -1 || resp.indexOf(query) !== -1 || lotes.indexOf(query) !== -1;
+    const id = String(r['Id_Reporte'] || '').toLowerCase();
+    return placa.indexOf(query) !== -1 || resp.indexOf(query) !== -1 || lotes.indexOf(query) !== -1 || id.indexOf(query) !== -1;
+  });
+}
+
+const EXCEL_BROWN = 'FF6B3F1D';      // café corporativo (--navy)
+const EXCEL_BROWN_DEEP = 'FF3D2412'; // café oscuro
+const EXCEL_CREAM = 'FFF4ECE2';      // crema para filas alternas
+const EXCEL_LINE = 'FFE6D9C9';       // líneas suaves
+
+/* "YYYY-MM-DD" / ISO guardado como solo-fecha → Date UTC para que Excel
+ * muestre el mismo día calendario (misma regla que formatDate). */
+function excelDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (isNaN(d)) return String(value);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+/* Arma el libro de Excel con el logo y los colores corporativos.
+ * opts: { records, pendingIds:Set, logo:dataURL, generatedAt:Date, query } */
+function buildDispatchWorkbook(ExcelJS, opts) {
+  const records = opts.records;
+  const fixedKeys = ['Fecha ', 'Placa Del Vehiculo ', 'Numero De Lotes ', 'Nom: Del Respnsable del Despacho '];
+  const extraKeysSet = new Set();
+  records.forEach(rec => {
+    Object.keys(rec).forEach(key => {
+      if (fixedKeys.indexOf(key) !== -1 || DETAIL_SKIP_KEYS.has(key) || key === 'Id_Reporte') return;
+      extraKeysSet.add(key);
+    });
+  });
+  const extraKeys = Array.from(extraKeysSet);
+
+  const columns = [
+    { header: 'Código de despacho', width: 20, get: r => String(r['Id_Reporte'] || ''), align: 'center' },
+    { header: 'Fecha', width: 14, get: r => excelDate(r['Fecha ']), align: 'center', fmt: 'dd/mm/yyyy' },
+    { header: 'Placa del vehículo', width: 18, get: r => String(r['Placa Del Vehiculo '] || ''), align: 'center' },
+    { header: 'Número de lotes', width: 18, align: 'center',
+      get: r => { const v = String(r['Numero De Lotes '] == null ? '' : r['Numero De Lotes ']).trim(); return /^\d+$/.test(v) ? Number(v) : v; } },
+    { header: 'Responsable del despacho', width: 34, get: r => String(r['Nom: Del Respnsable del Despacho '] || ''), align: 'left' },
+    { header: 'Documento anexo', width: 48, align: 'left',
+      get: r => { const p = String(r['Documentos Anexos'] || ''); return p ? p.split('/').pop() : '—'; } },
+    { header: 'Fotos', width: 14, align: 'center', get: r => opts.pendingIds.has(String(r['Id_Reporte'])) ? 'Sin fotos' : 'Con fotos' }
+  ].concat(extraKeys.map(k => ({
+    header: friendlyLabel(k), width: 22, align: 'left',
+    get: r => (r[k] === undefined || r[k] === null) ? '' : String(r[k])
+  })));
+  const nCols = columns.length;
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'CSC Coffee and Softs Company S.A.S.';
+  wb.created = opts.generatedAt;
+  const ws = wb.addWorksheet('Despachos', {
+    views: [{ state: 'frozen', ySplit: 5, showGridLines: false }],
+    pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9,
+      margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
+      printTitlesRow: '5:5' }
+  });
+  columns.forEach((c, i) => { ws.getColumn(i + 1).width = c.width; });
+
+  const white = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+  const brown = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_BROWN } };
+  const cream = { type: 'pattern', pattern: 'solid', fgColor: { argb: EXCEL_CREAM } };
+
+  // Franja superior blanca (logo + título) — filas 1 y 2
+  ws.getRow(1).height = 30; ws.getRow(2).height = 30;
+  for (let r = 1; r <= 2; r++) for (let c = 1; c <= nCols; c++) ws.getCell(r, c).fill = white;
+
+  if (opts.logo) {
+    const imageId = wb.addImage({ base64: opts.logo, extension: 'png' });
+    // El logo original mide 846 × 162 px → se muestra a 330 × 63 px (misma proporción).
+    ws.addImage(imageId, { tl: { col: 0.08, row: 0.1 }, ext: { width: 330, height: 63 } });
+  }
+
+  const titleStart = Math.max(4, nCols - 3); // el título ocupa las últimas columnas, a la derecha
+  ws.mergeCells(1, titleStart, 1, nCols);
+  const title = ws.getCell(1, titleStart);
+  title.value = 'REPORTE DE DESPACHOS';
+  title.font = { name: 'Calibri', size: 20, bold: true, color: { argb: EXCEL_BROWN } };
+  title.alignment = { horizontal: 'right', vertical: 'middle' };
+
+  ws.mergeCells(2, titleStart, 2, nCols);
+  const gen = opts.generatedAt;
+  const pad = n => String(n).padStart(2, '0');
+  const stamp = pad(gen.getDate()) + '/' + pad(gen.getMonth() + 1) + '/' + gen.getFullYear() + ' ' + pad(gen.getHours()) + ':' + pad(gen.getMinutes());
+  const sub = ws.getCell(2, titleStart);
+  sub.value = 'Generado: ' + stamp + '  ·  ' + records.length + ' registro(s)' + (opts.query ? '  ·  Filtro: «' + opts.query + '»' : '');
+  sub.font = { name: 'Calibri', size: 11, italic: true, color: { argb: 'FF7A6655' } };
+  sub.alignment = { horizontal: 'right', vertical: 'middle' };
+
+  // Franja café (fila 3) y espacio (fila 4)
+  ws.getRow(3).height = 8;
+  for (let c = 1; c <= nCols; c++) ws.getCell(3, c).fill = brown;
+  ws.getRow(4).height = 10;
+
+  // Encabezados de la tabla (fila 5)
+  const headRow = ws.getRow(5);
+  headRow.height = 28;
+  columns.forEach((col, i) => {
+    const cell = headRow.getCell(i + 1);
+    cell.value = col.header;
+    cell.fill = brown;
+    cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.border = { top: { style: 'thin', color: { argb: EXCEL_BROWN_DEEP } }, bottom: { style: 'medium', color: { argb: EXCEL_BROWN_DEEP } },
+      left: { style: 'thin', color: { argb: EXCEL_BROWN_DEEP } }, right: { style: 'thin', color: { argb: EXCEL_BROWN_DEEP } } };
   });
 
+  // Filas de datos (zebra crema/blanco)
+  const thin = { style: 'thin', color: { argb: EXCEL_LINE } };
+  records.forEach((rec, idx) => {
+    const row = ws.getRow(6 + idx);
+    row.height = 20;
+    columns.forEach((col, i) => {
+      const cell = row.getCell(i + 1);
+      cell.value = col.get(rec);
+      cell.fill = idx % 2 === 0 ? white : cream;
+      cell.font = { name: 'Calibri', size: 11, color: { argb: 'FF2B1D12' } };
+      cell.alignment = { horizontal: col.align, vertical: 'middle', wrapText: false };
+      cell.border = { top: thin, bottom: thin, left: thin, right: thin };
+      if (col.fmt) cell.numFmt = col.fmt;
+    });
+    const fotosCell = row.getCell(7);
+    if (fotosCell.value === 'Sin fotos') fotosCell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFC0392B' } };
+  });
+
+  // Pie con total
+  const lastData = 5 + records.length;
+  const foot = ws.getRow(lastData + 2);
+  ws.mergeCells(lastData + 2, 1, lastData + 2, Math.min(4, nCols));
+  const footCell = foot.getCell(1);
+  footCell.value = 'Total de despachos: ' + records.length;
+  footCell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: EXCEL_BROWN } };
+  footCell.alignment = { horizontal: 'left', vertical: 'middle' };
+  const brand = ws.getRow(lastData + 3).getCell(1);
+  ws.mergeCells(lastData + 3, 1, lastData + 3, Math.min(5, nCols));
+  brand.value = 'CSC Coffee and Softs Company S.A.S.';
+  brand.font = { name: 'Calibri', size: 10, italic: true, color: { argb: 'FF7A6655' } };
+
+  ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5, column: nCols } };
+  return wb;
+}
+
+/* Descarga un .xlsx con logo y color corporativo con los reportes que están
+ * visibles en "Registros guardados" (respeta el buscador). Si el generador de
+ * Excel no se puede cargar (sin internet), cae a un CSV simple. */
+async function exportGalleryExcel() {
+  const filtered = getFilteredRecords();
   if (!filtered.length) {
     window.alert('No hay reportes para exportar con el filtro actual.');
     return;
   }
+  const btn = document.getElementById('exportCsvBtn');
+  const original = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner dark"></span> Generando…'; }
+  try {
+    const ExcelJS = await loadExcelJs();
+    const pendingIds = new Set((pendingPhotosCache[currentGroup] || []).map(p => String(p.id)));
+    const wb = buildDispatchWorkbook(ExcelJS, {
+      records: filtered,
+      pendingIds,
+      logo: (window.CSC_LOGOS && window.CSC_LOGOS.wide) || '',
+      generatedAt: new Date(),
+      query: document.getElementById('gallerySearch').value.trim()
+    });
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    downloadBlob(blob, 'Despachos_CSC_' + localDateString() + '.xlsx');
+  } catch (err) {
+    console.error(err);
+    window.alert('No se pudo generar el Excel con formato (' + err.message + '). Se descargará un archivo CSV simple.');
+    exportGalleryCSV();
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = original; }
+  }
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/* Respaldo: .csv (se abre directo en Excel) si no se puede generar el .xlsx. */
+function exportGalleryCSV() {
+  const filtered = getFilteredRecords();
+  if (!filtered.length) return;
 
   const fixedKeys = ['Fecha ', 'Placa Del Vehiculo ', 'Numero De Lotes ', 'Nom: Del Respnsable del Despacho '];
   const extraKeysSet = new Set();
@@ -1036,34 +1588,22 @@ function exportGalleryCSV() {
       extraKeysSet.add(key);
     });
   });
-  const allKeys = fixedKeys.concat(Array.from(extraKeysSet));
+  const allKeys = ['Id_Reporte'].concat(fixedKeys, Array.from(extraKeysSet));
 
-  const headerRow = allKeys.map(k => friendlyLabel(k));
-  const rows = [headerRow];
-
+  const rows = [allKeys.map(k => k === 'Id_Reporte' ? 'Código de despacho' : friendlyLabel(k))];
   filtered.forEach(rec => {
-    const row = allKeys.map(key => {
+    rows.push(allKeys.map(key => {
       const value = rec[key];
       if (value === undefined || value === null) return '';
       if (key === 'Fecha ') return formatDate(value);
       return String(value);
-    });
-    rows.push(row);
+    }));
   });
 
   const csvContent = rows.map(row => row.map(csvEscape).join(',')).join('\r\n');
   // El BOM al inicio hace que Excel muestre bien las tildes y la "ñ".
-  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-
-  const groupName = (GROUP_LABELS[currentGroup] || currentGroup).replace(/\s+/g, '_');
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = 'Reportes_' + groupName + '_' + localDateString() + '.csv';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  const blob = new Blob(['﻿' + csvContent], { type: 'text/csv;charset=utf-8;' });
+  downloadBlob(blob, 'Despachos_CSC_' + localDateString() + '.csv');
 }
 
 /* Envuelve en comillas y escapa un valor para que el CSV se abra bien en
@@ -1095,6 +1635,7 @@ function buildDetailsGrid(rec) {
     grid.appendChild(item);
   };
 
+  addItem('Código de despacho', rec['Id_Reporte']);
   addItem('Fecha', rec['Fecha ']);
   addItem('Placa del vehículo', rec['Placa Del Vehiculo ']);
   addItem('Número de lotes', rec['Numero De Lotes ']);
@@ -1115,7 +1656,13 @@ async function buildDocumentLink(rec) {
   const path = rec['Documentos Anexos'];
   if (!path) return null;
   try {
-    const data = await fetchJson(WEB_APP_URL + '?action=mainFile&group=' + currentGroup + '&path=' + encodeURIComponent(path));
+    const ck = 'doc:' + path;
+    const hit = cacheGet(ck);
+    let data = hit ? hit.d : null;
+    if (!data) {
+      data = await fetchJson(WEB_APP_URL + '?action=mainFile&group=' + currentGroup + '&path=' + encodeURIComponent(path));
+      if (data.ok && data.viewUrl) cacheSet(ck, data);
+    }
     if (!data.ok || !data.viewUrl) return null;
     const a = document.createElement('a');
     a.className = 'doc-link';
@@ -1150,15 +1697,14 @@ async function loadImages(reportId, bodyEl, rec) {
     loadingImgs.innerHTML = '<span class="spinner dark"></span>Cargando imágenes…';
     bodyEl.appendChild(loadingImgs);
 
-    const data = await fetchJson(WEB_APP_URL + '?action=listImages&group=' + currentGroup + '&reportId=' + encodeURIComponent(reportId));
-    if (!data.ok) throw new Error(data.error || 'Error desconocido');
+    const images = await getReportImages(reportId);
 
     loadingImgs.remove();
 
-    if (data.images.length) {
+    if (images.length) {
       const grid = document.createElement('div');
       grid.className = 'img-grid';
-      data.images.forEach(img => {
+      images.forEach(img => {
         const cell = document.createElement('div');
         cell.className = 'img-cell';
 
@@ -1257,10 +1803,21 @@ async function deletePhoto(img, cell, btn) {
     });
     if (!data.ok) throw new Error(data.error || 'Error desconocido');
 
+    // Se actualiza la caché local de este reporte (sin volver a pedirla).
+    const key = 'imgs:' + img.reportId;
+    const hit = cacheGet(key);
+    if (hit) {
+      const left = hit.d.filter(x => x.path !== img.path);
+      cacheSet(key, left, hit.t);
+      if (!left.length) setReportPending(img.reportId, true);
+    } else {
+      cacheRemove(key);
+    }
+    persistData();
     // Animación de salida y luego se quita del DOM.
     cell.classList.add('removing');
     setTimeout(() => cell.remove(), 180);
-    refreshPendingBadge(); // si era su última foto, el reporte vuelve a quedar "pendiente"
+    renderNotifBadge(); // si era su última foto, el reporte vuelve a quedar "pendiente"
   } catch (err) {
     btn.classList.remove('is-loading');
     btn.disabled = false;
@@ -1295,11 +1852,10 @@ async function deleteReport(reportId, triggerBtn) {
 
     // Se quita el reporte de la caché local y se vuelve a dibujar la lista,
     // sin necesidad de recargar todo desde el servidor.
-    if (recordsCache[currentGroup]) {
-      recordsCache[currentGroup] = recordsCache[currentGroup].filter(r => r['Id_Reporte'] !== reportId);
-    }
+    removeLocalRecord(reportId);
     renderGallery();
-    refreshHubCounts();
+    updateHubCount();
+    renderNotifBadge();
   } catch (err) {
     triggerBtn.disabled = false;
     triggerBtn.textContent = originalText;

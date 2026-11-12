@@ -63,13 +63,13 @@
       '<div class="modal-box">' +
         '<h3>Editar usuario</h3>' +
         '<div class="field"><label>Nombre completo</label><input type="text" id="euNombre" value="' + esc(u.nombre) + '"></div>' +
-        '<div class="field"><label>Cédula</label><input type="text" id="euCedula" inputmode="numeric" value="' + esc(u.cedula) + '"' + (soyYo ? ' disabled' : '') + '></div>' +
+        '<div class="field"><label>Cédula</label><input type="text" id="euCedula" value="' + esc(u.cedula) + '"></div>' +
         '<div class="field"><label>Nueva contraseña</label><input type="password" id="euClave" autocomplete="new-password" placeholder="Déjala vacía para no cambiarla"></div>' +
         '<div class="field"><label>Rol</label><select class="eu-select" id="euRol"' + (soyYo ? ' disabled' : '') + '>' +
           '<option value="usuario">Usuario</option><option value="admin">Administrador</option></select></div>' +
         '<div class="field"><label>Estado</label><select class="eu-select" id="euEstado"' + (soyYo ? ' disabled' : '') + '>' +
           '<option value="autorizado">Autorizado</option><option value="pendiente">Pendiente</option><option value="rechazado">Rechazado</option></select>' +
-          (soyYo ? '<div class="eu-hint">Es tu propia cuenta: la cédula, el rol y el estado no se pueden cambiar desde aquí.</div>' : '') +
+          (soyYo ? '<div class="eu-hint">Es tu propia cuenta: el rol y el estado no se pueden cambiar. Si cambias tu cédula, tendrás que iniciar sesión de nuevo.</div>' : '') +
         '</div>' +
         '<div class="status" id="euStatus"></div>' +
         '<div class="eu-actions">' +
@@ -133,6 +133,11 @@
           if (u.badge) {
             u.badge.textContent = res.estado;
             u.badge.className = 'badge-estado badge-' + res.estado;
+          }
+          if (soyYo && res.cedula !== u.cedula) {
+            msg('Cambios guardados. Cierra sesión e ingresa con tu nueva cédula.', true);
+            setTimeout(function () { close(); var lo = document.getElementById('logoutBtn'); if (lo) lo.click(); }, 1800);
+            return;
           }
           msg(res.claveCambiada ? 'Cambios guardados. La contraseña también se actualizó.' : 'Cambios guardados.', true);
           setTimeout(close, 1100);

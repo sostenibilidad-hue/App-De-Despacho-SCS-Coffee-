@@ -17,11 +17,25 @@
   var css = [
     '.csc-layout{display:flex;min-height:100vh;}',
     '.csc-content{flex:1;min-width:0;display:flex;flex-direction:column;}',
-    '.csc-side{width:250px;flex-shrink:0;align-self:flex-start;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;',
-    '  background:linear-gradient(180deg,#3D2412 0%,#4E2E17 100%);color:#fff;padding:18px 12px;z-index:300;overflow-y:auto;}',
-    '.csc-side .app-header-left{display:flex;flex-direction:row;align-items:center;gap:10px;padding:2px 6px 18px;margin-bottom:12px;border-bottom:1px solid rgba(255,255,255,.12);}',
-    '.csc-side .logo-badge{width:42px;height:42px;border-radius:11px;padding:6px;margin:0;background:#fff;flex-shrink:0;}',
-    '.csc-side .app-header-titles h1{font-size:15px;line-height:1.25;margin:0;color:#fff;}',
+    '.csc-slot{width:72px;flex-shrink:0;position:relative;}',
+    '.csc-side{width:282px;position:fixed;left:0;top:0;height:100vh;display:flex;flex-direction:column;overflow-x:hidden;',
+    '  background:linear-gradient(180deg,#3D2412 0%,#4E2E17 100%);color:#fff;padding:18px 12px;z-index:300;overflow-y:auto;transition:width .25s ease,box-shadow .25s ease;}',
+    /* Marca: logo grande arriba, el texto después */
+    '.csc-side .app-header-left{display:flex;flex-direction:column;align-items:stretch;gap:9px;padding:2px 0 16px;margin-bottom:12px;border-bottom:1px solid rgba(255,255,255,.12);position:relative;}',
+    '.csc-side .logo-wide{background:#fff;border-radius:14px;padding:8px 10px;line-height:0;box-shadow:0 4px 14px rgba(0,0,0,.25);}',
+    '.csc-side .logo-wide img{display:block;width:100%;height:auto;}',
+    '.csc-side .app-header-titles h1{font-size:11.5px;line-height:1.25;margin:0;color:#E9D5BC;letter-spacing:.16em;text-transform:uppercase;text-align:center;font-weight:600;}',
+    '.csc-badge-mini{display:none;width:44px;height:44px;border-radius:12px;background:#fff;padding:6px;box-shadow:0 4px 12px rgba(0,0,0,.25);}',
+    /* Barra que se oculta sola (solo computador): queda una franja de íconos */
+    '@media (min-width:900px){',
+    '  .csc-side.collapsed{width:72px;}',
+    '  .csc-side.collapsed .logo-wide, .csc-side.collapsed .app-header-titles, .csc-side.collapsed .csc-item span, .csc-side.collapsed .icon-btn span,',
+    '  .csc-side.collapsed .csc-label, .csc-side.collapsed .csc-user > div:last-child{display:none;}',
+    '  .csc-side.collapsed .csc-badge-mini{display:block;margin:0 auto;}',
+    '  .csc-side.collapsed .csc-item, .csc-side.collapsed .icon-btn{justify-content:center;padding:11px 0;border-left-width:0;}',
+    '  .csc-side.collapsed .csc-user{justify-content:center;padding:8px 0 12px;}',
+    '  .csc-side:not(.collapsed){box-shadow:10px 0 34px rgba(0,0,0,.28);}',
+    '}',
     '.csc-label{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#CDB594;font-weight:700;padding:10px 12px 6px;}',
     '.csc-side .csc-item, .csc-side .icon-btn{display:flex;align-items:center;gap:11px;width:100%;padding:11px 12px;margin:0 0 3px;border:none;border-left:3px solid transparent;',
     '  border-radius:10px;background:transparent;color:#EBDCC8;font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;text-align:left;}',
@@ -48,7 +62,8 @@
     '.csc-overlay.show{display:block;}',
     '@media (min-width:900px){.floating-back{display:none !important;}}',
     '@media (max-width:899px){',
-    '  .csc-side{position:fixed;left:0;top:0;width:262px;transform:translateX(-100%);transition:transform .25s ease;box-shadow:8px 0 30px rgba(0,0,0,.3);}',
+    '  .csc-slot{width:0;}',
+    '  .csc-side{width:282px;max-width:86vw;transform:translateX(-100%);transition:transform .25s ease;box-shadow:8px 0 30px rgba(0,0,0,.3);}',
     '  .csc-side.open{transform:none;}',
     '  .csc-burger{display:flex;}',
     '  #appScreen .app-header{padding:12px 16px;}',
@@ -85,7 +100,14 @@
 
   // Logo + título pasan a la barra lateral (se mueve el elemento original)
   var brand = header.querySelector('.app-header-left');
-  if (brand) side.appendChild(brand);
+  if (brand) {
+    var mini = document.createElement('img');
+    mini.className = 'csc-badge-mini';
+    mini.alt = 'CSC';
+    if (window.CSC_LOGOS) mini.src = window.CSC_LOGOS.squared;
+    brand.insertBefore(mini, brand.firstChild);
+    side.appendChild(brand);
+  }
 
   function navItem(icon, text) {
     var b = document.createElement('button');
@@ -140,7 +162,10 @@
 
   content.appendChild(header);
   content.appendChild(main);
-  layout.appendChild(side);
+  var slot = document.createElement('div');
+  slot.className = 'csc-slot';
+  slot.appendChild(side);
+  layout.appendChild(slot);
   layout.appendChild(content);
   app.appendChild(layout);
   document.body.appendChild(overlay);
@@ -195,6 +220,35 @@
       }
     }
   }
+  /* ---------------- Auto-ocultar (computador) ----------------
+   * La barra se abre cuando se usa (mouse encima, teclado, toque) y, si no
+   * se está trabajando en ella, se recoge sola a una franja de íconos. */
+  var desktop = window.matchMedia('(min-width:900px)');
+  var hideTimer = null;
+  function collapse() { if (desktop.matches) side.classList.add('collapsed'); }
+  function expand() { clearTimeout(hideTimer); side.classList.remove('collapsed'); }
+  function scheduleCollapse(ms) {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function () {
+      if (side.matches(':hover') || side.contains(document.activeElement)) { scheduleCollapse(1200); return; }
+      collapse();
+    }, ms);
+  }
+  side.addEventListener('mouseenter', expand);
+  side.addEventListener('mouseleave', function () { scheduleCollapse(1500); });
+  side.addEventListener('focusin', expand);
+  side.addEventListener('focusout', function () { scheduleCollapse(1500); });
+  side.addEventListener('touchstart', expand, { passive: true });
+  // Al elegir una opción se recoge enseguida, para dejar todo el espacio al trabajo.
+  [navHome, navForm, navGal, adminBtn].forEach(function (b) {
+    if (b) b.addEventListener('click', function () { scheduleCollapse(600); });
+  });
+  // Al entrar a la app se muestra abierta unos segundos y luego se recoge.
+  scheduleCollapse(3500);
+  if (desktop.addEventListener) desktop.addEventListener('change', function () {
+    if (!desktop.matches) side.classList.remove('collapsed'); else scheduleCollapse(1500);
+  });
+
   new MutationObserver(sync).observe(app, { attributes: true, subtree: true, attributeFilter: ['style', 'class'] });
   setInterval(sync, 800);
   sync();

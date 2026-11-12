@@ -667,6 +667,13 @@ body{ height:auto; min-height:100vh; min-height:100dvh; background: linear-gradi
   .bean-widget{ transform: translateX(-50%) scale(.36); }
   .brand-banner-inner img{ height:26px; }
 }
+
+/* ===== Cerrar sesión en el menú lateral (solo celular/tablet) ===== */
+.csc-logout-mobile{ display:none !important; }
+@media (max-width: 899px){
+  .csc-logout-mobile{ display:flex !important; margin-top:6px; cursor:pointer; }
+  .csc-logout-mobile svg{ color:#FFB4A8; }
+}
 </style>
 </head>
 <body>
@@ -1066,5 +1073,41 @@ body{ height:auto; min-height:100vh; min-height:100dvh; background: linear-gradi
 <script src="app.js?v=5"></script>
 <script src="sidebar.js?v=5"></script>
 <script src="editar-usuarios.js?v=5"></script>
+
+<script>
+/* Agrega "Cerrar sesión" al menú lateral del celular, usando el botón Salir original */
+(function () {
+  var ICON = '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="M16 17l5-5-5-5"></path><path d="M21 12H9"></path>';
+  function addLogout() {
+    var side = document.querySelector('.csc-side');
+    if (!side) return false;
+    if (side.querySelector('.csc-logout-mobile')) return true;
+    var items = side.querySelectorAll('.csc-item');
+    if (!items.length) return false;
+    var base = items[0];
+    var btn = base.cloneNode(true);
+    btn.className = base.className.replace(/\bactive\b/g, '').trim() + ' csc-logout-mobile';
+    btn.removeAttribute('id'); btn.removeAttribute('href'); btn.removeAttribute('data-go');
+    var svg = btn.querySelector('svg');
+    if (svg) svg.innerHTML = ICON;
+    var label = btn.querySelector('span');
+    if (label) label.textContent = 'Cerrar sesión'; else btn.appendChild(document.createTextNode('Cerrar sesión'));
+    btn.setAttribute('role', 'button');
+    btn.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var out = document.getElementById('logoutBtn');
+      if (out) out.click();
+    });
+    var last = items[items.length - 1];
+    last.parentNode.insertBefore(btn, last.nextSibling);
+    return true;
+  }
+  var tries = 0;
+  var timer = setInterval(function () {
+    if (addLogout() || ++tries > 40) clearInterval(timer);
+  }, 250);
+  window.addEventListener('load', addLogout);
+})();
+</script>
 </body>
 </html>

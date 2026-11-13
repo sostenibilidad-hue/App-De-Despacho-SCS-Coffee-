@@ -16,6 +16,10 @@
   var me = null, users = [], msgs = [], seen = {}, lastId = 0;
   var active = 'group', isOpen = false, busy = false, offline = false, filter = '';
   var readTs = {};
+  var pendingFile = null, sendingFile = false;
+  var MAX_BYTES = 8 * 1024 * 1024;
+  var DOC_EXT = ['pdf','doc','docx','xls','xlsx','ppt','pptx','txt','csv'];
+  var IMG_EXT = ['jpg','jpeg','png','gif','webp'];
 
   /* ---------------- Estilos ---------------- */
   var st = document.createElement('style');
@@ -62,6 +66,32 @@
     '.chat-badge{display:none;margin-left:auto;min-width:19px;height:19px;border-radius:10px;background:var(--err);color:#fff;font-size:11px;font-weight:800;font-style:normal;align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;}',
     '.chat-badge.show{display:flex;}',
     '.csc-side.collapsed .chat-badge{position:absolute;top:4px;right:10px;margin:0;min-width:16px;height:16px;font-size:10px;}',
+    '.chat-form{position:relative;flex-direction:column;align-items:stretch;gap:8px;}',
+    '.chat-row{display:flex;gap:8px;align-items:flex-end;}',
+    '.chat-tool{width:42px;height:42px;border:1px solid var(--line);border-radius:12px;background:#FAF5EE;color:var(--navy-deep);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:20px;padding:0;font-family:inherit;}',
+    '.chat-tool:hover,.chat-tool.on{background:#EBDCC8;}',
+    '.chat-tool:disabled{opacity:.45;cursor:default;}',
+    '.chat-attach{display:none;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:12px;background:#FDFAF6;}',
+    '.chat-attach.show{display:flex;}',
+    '.chat-attach img{width:46px;height:46px;object-fit:cover;border-radius:8px;flex-shrink:0;}',
+    '.chat-attach .ficon{width:46px;height:46px;border-radius:8px;background:#EBDCC8;color:var(--navy-deep);font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;text-transform:uppercase;}',
+    '.chat-attach .fname{flex:1;min-width:0;font-size:13.5px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+    '.chat-attach .fsub{font-size:11.5px;color:var(--ink-soft);font-weight:400;}',
+    '.chat-attach .fx{border:none;background:transparent;font-size:20px;line-height:1;color:var(--ink-soft);cursor:pointer;padding:4px 8px;}',
+    '.chat-emoji{display:none;position:absolute;left:14px;bottom:calc(100% - 6px);width:min(340px,calc(100% - 28px));background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 28px rgba(61,36,18,.18);z-index:20;overflow:hidden;}',
+    '.chat-emoji.show{display:block;}',
+    '.chat-emoji-tabs{display:flex;border-bottom:1px solid var(--line);background:#FDFAF6;}',
+    '.chat-emoji-tabs button{flex:1;border:none;background:transparent;padding:8px 0;font-size:18px;cursor:pointer;border-bottom:3px solid transparent;}',
+    '.chat-emoji-tabs button.on{border-bottom-color:#6B3F1D;background:#F4ECE2;}',
+    '.chat-emoji-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:8px;max-height:210px;overflow-y:auto;}',
+    '.chat-emoji-grid button{border:none;background:transparent;font-size:22px;padding:5px 0;border-radius:8px;cursor:pointer;line-height:1;}',
+    '.chat-emoji-grid button:hover{background:#F4ECE2;}',
+    '.chat-img{display:block;max-width:100%;width:240px;max-height:260px;object-fit:cover;border-radius:10px;margin:2px 0 4px;background:#EFE4D5;cursor:zoom-in;}',
+    '.chat-file{display:flex;align-items:center;gap:10px;padding:8px 10px;margin:2px 0 4px;border-radius:10px;text-decoration:none;color:inherit;background:rgba(0,0,0,.07);min-width:200px;}',
+    '.chat-msg.other .chat-file{background:#F4ECE2;}',
+    '.chat-file .ficon{width:38px;height:38px;border-radius:8px;background:#E9C98C;color:#3D2412;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;text-transform:uppercase;}',
+    '.chat-file .fname{font-size:13.5px;font-weight:700;word-break:break-all;line-height:1.25;}',
+    '.chat-file .fsub{font-size:11px;opacity:.75;}',
     '@media (max-width:760px){',
     '  .chat-wrap{height:calc(100vh - 110px);height:calc(100dvh - 110px);}',
     '  .chat-list{width:100%;border-right:none;}',
@@ -90,9 +120,19 @@
           '<div><div class="chat-head-name" id="chatHeadName">Equipo CSC</div><div class="chat-head-sub" id="chatHeadSub">Todos los usuarios autorizados</div></div>' +
           '<div class="chat-status" id="chatStatus"></div></div>' +
         '<div class="chat-msgs" id="chatMsgs"></div>' +
-        '<div class="chat-form"><textarea id="chatInput" rows="1" maxlength="1000" placeholder="Escribe un mensaje…"></textarea>' +
-          '<button type="button" class="chat-send" id="chatSend" aria-label="Enviar">' +
-          '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg></button></div>' +
+        '<div class="chat-form" id="chatForm">' +
+          '<div class="chat-emoji" id="chatEmoji"><div class="chat-emoji-tabs" id="chatEmojiTabs"></div><div class="chat-emoji-grid" id="chatEmojiGrid"></div></div>' +
+          '<div class="chat-attach" id="chatAttach"></div>' +
+          '<div class="chat-row">' +
+            '<input type="file" id="chatFile" hidden accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv">' +
+            '<button type="button" class="chat-tool" id="chatClip" aria-label="Adjuntar imagen o documento" title="Adjuntar imagen o documento">' +
+              '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5l-8.6 8.6a5.5 5.5 0 01-7.8-7.8l8.6-8.6a3.7 3.7 0 015.2 5.2l-8.6 8.6a1.8 1.8 0 01-2.6-2.6l7.9-7.9"/></svg></button>' +
+            '<button type="button" class="chat-tool" id="chatEmojiBtn" aria-label="Emojis" title="Emojis">\uD83D\uDE0A</button>' +
+            '<textarea id="chatInput" rows="1" maxlength="1000" placeholder="Escribe un mensaje…"></textarea>' +
+            '<button type="button" class="chat-send" id="chatSend" aria-label="Enviar">' +
+            '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg></button>' +
+          '</div>' +
+        '</div>' +
       '</div>' +
     '</div>';
   main.appendChild(panel);
@@ -105,8 +145,9 @@
     '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.6 7.1L4 20l1-4.6A8 8 0 1121 12z"/></svg>' +
     '<span>Chat</span><i class="chat-badge" id="chatBadge"></i>';
   var adminBtn = $('adminBtn');
-  var anchor = adminBtn && adminBtn.previousElementSibling && adminBtn.previousElementSibling.classList.contains('csc-label')
-    ? adminBtn.previousElementSibling : side.querySelector('.csc-bottom');
+  var anchor = side.querySelector('.csc-label-modulos') ||
+    (adminBtn && adminBtn.previousElementSibling && adminBtn.previousElementSibling.classList.contains('csc-label')
+      ? adminBtn.previousElementSibling : side.querySelector('.csc-bottom'));
   side.insertBefore(navChat, anchor);
 
   /* ---------------- Utilidades ---------------- */
@@ -144,6 +185,11 @@
   }
   function inThread(v) { $('chatWrap').classList.toggle('in-thread', v); }
 
+  function extOf(n) { var m = /\.([a-zA-Z0-9]{1,5})$/.exec(String(n || '')); return m ? m[1].toLowerCase() : ''; }
+  function isImgName(n) { return IMG_EXT.indexOf(extOf(n)) !== -1; }
+  function fmtKB(b) { return b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
+  function attLabel(m) { return isImgName(m.adjNombre) ? '\uD83D\uDCF7 Foto' : '\uD83D\uDCCE ' + (m.adjNombre || 'Documento'); }
+
   /* ---------------- Render ---------------- */
   function renderBadge() {
     var n = totalUnread(), b = $('chatBadge');
@@ -158,7 +204,7 @@
     row.appendChild(el('div', 'chat-av' + (grp ? ' grp' : ''), grp ? '👥' : name.charAt(0).toUpperCase()));
     var body = el('div', 'chat-conv-body');
     body.appendChild(el('div', 'chat-conv-name', name));
-    var preview = last ? ((last.de === me ? 'Tú: ' : (grp ? last.nombre.split(' ')[0] + ': ' : '')) + last.texto) : sub;
+    var preview = last ? ((last.de === me ? 'Tú: ' : (grp ? last.nombre.split(' ')[0] + ': ' : '')) + (last.texto || (last.adjNombre ? attLabel(last) : ''))) : sub;
     body.appendChild(el('div', 'chat-conv-last', preview));
     row.appendChild(body);
     var meta = el('div', 'chat-conv-meta');
@@ -213,8 +259,29 @@
       var mine = m.de === me;
       var b = el('div', 'chat-msg ' + (mine ? 'me' : 'other') + (m.temp ? ' pending' : '') + (m.failed ? ' failed' : ''));
       if (!mine && active === 'group') b.appendChild(el('div', 'chat-who', m.nombre));
-      b.appendChild(document.createTextNode(m.texto));
-      b.appendChild(el('div', 'chat-time', m.failed ? 'No enviado — toca para reintentar' : (m.temp ? 'Enviando…' : fmtTime(m.ts))));
+      if (m.adjNombre) {
+        var isImg = isImgName(m.adjNombre);
+        var viewUrl = m.adjId ? 'https://drive.google.com/file/d/' + m.adjId + '/view' : '';
+        var dlUrl = m.adjId ? 'https://drive.google.com/uc?export=download&id=' + m.adjId : '';
+        if (isImg) {
+          var im = document.createElement('img');
+          im.className = 'chat-img'; im.alt = m.adjNombre; im.loading = 'lazy';
+          im.src = m.adjId ? 'https://drive.google.com/thumbnail?id=' + m.adjId + '&sz=w600' : (m.preview || '');
+          if (viewUrl) im.addEventListener('click', function (ev) { ev.stopPropagation(); window.open(viewUrl, '_blank', 'noopener'); });
+          b.appendChild(im);
+        } else {
+          var fa = document.createElement(dlUrl ? 'a' : 'div');
+          fa.className = 'chat-file';
+          if (dlUrl) { fa.href = dlUrl; fa.target = '_blank'; fa.rel = 'noopener'; fa.addEventListener('click', function (ev) { ev.stopPropagation(); }); }
+          fa.appendChild(el('div', 'ficon', extOf(m.adjNombre) || 'doc'));
+          var fb = el('div'); fb.appendChild(el('div', 'fname', m.adjNombre.replace(/^\d+_\d+_/, '')));
+          fb.appendChild(el('div', 'fsub', dlUrl ? 'Toca para descargar' : 'Subiendo…'));
+          fa.appendChild(fb);
+          b.appendChild(fa);
+        }
+      }
+      if (m.texto) b.appendChild(document.createTextNode(m.texto));
+      b.appendChild(el('div', 'chat-time', m.failed ? (m.errMsg ? m.errMsg + ' — toca para reintentar' : 'No enviado — toca para reintentar') : (m.temp ? 'Enviando…' : fmtTime(m.ts))));
       if (m.failed) b.addEventListener('click', function () { retry(m); });
       box.appendChild(b);
     });
@@ -222,7 +289,7 @@
   }
 
   function selectConv(conv) {
-    active = conv; markRead(conv); filter = ''; $('chatSearch').value = '';
+    active = conv; markRead(conv); filter = ''; $('chatSearch').value = ''; closeEmoji();
     renderList(); renderHead(); renderThread(true); inThread(true);
     if (window.matchMedia('(min-width:761px)').matches) $('chatInput').focus();
   }
@@ -273,16 +340,17 @@
     busy = false;
   }
 
-  async function send(texto, tempMsg) {
+  async function send(texto, tempMsg, fileData) {
     var tipo = active === 'group' ? 'grupo' : 'directo';
     var temp = tempMsg;
     if (!temp) {
       temp = { id: 'tmp' + Date.now(), ts: Date.now(), de: me, nombre: currentUser.nombre, tipo: tipo, para: tipo === 'directo' ? active : '', texto: texto, temp: true };
+      if (fileData) { temp.file = fileData; temp.adjNombre = fileData.filename; temp.preview = fileData.preview || ''; }
       msgs.push(temp);
     } else { temp.failed = false; temp.temp = true; }
     renderList(); renderThread(true);
     try {
-      var d = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action: 'chatSend', cedula: me, tipo: temp.tipo, para: temp.para, texto: temp.texto }) }, 2);
+      var d = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action: 'chatSend', cedula: me, tipo: temp.tipo, para: temp.para, texto: temp.texto, file: temp.file ? { base64: temp.file.base64, mimeType: temp.file.mimeType, filename: temp.file.filename } : undefined }) }, 2);
       if (!d.ok) throw new Error(d.error || 'Error');
       msgs = msgs.filter(function (m) { return m !== temp; });
       addMsg(d.message);
@@ -290,18 +358,113 @@
       markRead(convOf(d.message));
     } catch (e) {
       temp.temp = false; temp.failed = true;
+      if (e && /archivo|tipo|MB/i.test(String(e.message))) temp.errMsg = String(e.message);
     }
     renderList(); renderThread(true);
   }
-  function retry(m) { send(m.texto, m); }
+  function retry(m) { send(m.texto, m, m.file); }
 
   /* ---------------- Eventos ---------------- */
   function doSend() {
     var ta = $('chatInput'), t = ta.value.trim();
-    if (!t) return;
+    if ((!t && !pendingFile) || sendingFile) return;
+    var f = pendingFile;
     ta.value = ''; ta.style.height = 'auto';
-    send(t);
+    clearAttach(); closeEmoji();
+    send(t, null, f);
   }
+
+  /* ---------------- Adjuntos ---------------- */
+  function clearAttach() {
+    pendingFile = null; $('chatFile').value = '';
+    var box = $('chatAttach'); box.classList.remove('show'); box.textContent = '';
+  }
+  function showAttach(f, sizeTxt) {
+    var box = $('chatAttach'); box.textContent = '';
+    if (f.preview) { var im = document.createElement('img'); im.src = f.preview; im.alt = ''; box.appendChild(im); }
+    else box.appendChild(el('div', 'ficon', extOf(f.filename) || 'doc'));
+    var mid = el('div', 'fname', f.filename);
+    mid.appendChild(el('div', 'fsub', sizeTxt));
+    box.appendChild(mid);
+    var x = el('button', 'fx', '×'); x.type = 'button'; x.setAttribute('aria-label', 'Quitar adjunto');
+    x.addEventListener('click', clearAttach);
+    box.appendChild(x); box.classList.add('show');
+  }
+  async function attachFile(file) {
+    if (!file) return;
+    var ext = extOf(file.name) || (file.type.indexOf('image/') === 0 ? file.type.slice(6).replace('jpeg', 'jpg') : '');
+    var isImg = file.type.indexOf('image/') === 0 || IMG_EXT.indexOf(ext) !== -1;
+    if (!isImg && DOC_EXT.indexOf(ext) === -1) { alert('Tipo de archivo no permitido. Usa imágenes, PDF, Word, Excel, PowerPoint, TXT o CSV.'); clearAttach(); return; }
+    if (!isImg && file.size > MAX_BYTES) { alert('El archivo supera el máximo de 8 MB.'); clearAttach(); return; }
+    sendingFile = true; $('chatSend').disabled = true;
+    try {
+      var fd;
+      if (isImg && typeof compressImageFile === 'function') {
+        var named = file.name && extOf(file.name) ? file : new File([file], 'foto_' + Date.now() + '.' + (ext || 'png'), { type: file.type });
+        fd = await compressImageFile(named, 1600, 0.78);
+        if (!isImgName(fd.filename)) fd.filename = 'foto_' + Date.now() + '.jpg';
+        fd.preview = 'data:' + fd.mimeType + ';base64,' + fd.base64;
+      } else {
+        fd = await new Promise(function (res, rej) {
+          var r = new FileReader();
+          r.onload = function () { res({ base64: String(r.result).split(',')[1], mimeType: file.type, filename: file.name, preview: '' }); };
+          r.onerror = function () { rej(new Error('No se pudo leer el archivo')); };
+          r.readAsDataURL(file);
+        });
+      }
+      if (fd.base64.length * 0.75 > MAX_BYTES) { alert('El archivo supera el máximo de 8 MB.'); clearAttach(); }
+      else { pendingFile = fd; showAttach(fd, fmtKB(Math.round(fd.base64.length * 0.75))); }
+    } catch (e) { alert('No se pudo preparar el archivo.'); clearAttach(); }
+    sendingFile = false; $('chatSend').disabled = false;
+  }
+  $('chatClip').addEventListener('click', function () { closeEmoji(); $('chatFile').click(); });
+  $('chatFile').addEventListener('change', function () { attachFile(this.files && this.files[0]); });
+  $('chatInput').addEventListener('paste', function (e) {
+    var items = (e.clipboardData && e.clipboardData.files) || [];
+    if (items.length) { e.preventDefault(); attachFile(items[0]); }
+  });
+
+  /* ---------------- Emojis ---------------- */
+  var EMO = [
+    ['\uD83D\uDE0A', 'Caras', '\uD83D\uDE00 \uD83D\uDE03 \uD83D\uDE04 \uD83D\uDE01 \uD83D\uDE06 \uD83D\uDE05 \uD83D\uDE02 \uD83E\uDD23 \uD83D\uDE0A \uD83D\uDE07 \uD83D\uDE42 \uD83D\uDE09 \uD83D\uDE0D \uD83E\uDD29 \uD83D\uDE18 \uD83D\uDE0B \uD83D\uDE1C \uD83E\uDD14 \uD83E\uDD28 \uD83D\uDE10 \uD83D\uDE11 \uD83D\uDE36 \uD83D\uDE44 \uD83D\uDE0F \uD83D\uDE0C \uD83D\uDE34 \uD83D\uDE2A \uD83D\uDE37 \uD83E\uDD12 \uD83E\uDD75 \uD83E\uDD76 \uD83E\uDD73 \uD83D\uDE0E \uD83E\uDD13 \uD83D\uDE15 \uD83D\uDE1F \uD83D\uDE2E \uD83D\uDE33 \uD83D\uDE22 \uD83D\uDE2D \uD83D\uDE24 \uD83D\uDE20 \uD83D\uDE21 \uD83E\uDD2F \uD83D\uDE31 \uD83D\uDE2C \uD83E\uDD7A'],
+    ['\uD83D\uDC4D', 'Gestos', '\uD83D\uDC4D \uD83D\uDC4E \uD83D\uDC4C \u270C\uFE0F \uD83E\uDD1E \uD83E\uDD1D \uD83D\uDC4F \uD83D\uDE4C \uD83D\uDE4F \uD83D\uDCAA \uD83D\uDC4B \uD83E\uDD19 \uD83D\uDC4A \u270A \u261D\uFE0F \uD83D\uDC49 \uD83D\uDC48 \uD83D\uDC46 \uD83D\uDC47 \uD83E\uDEF6 \u2764\uFE0F \uD83E\uDDE1 \uD83D\uDC9B \uD83D\uDC9A \uD83D\uDC99 \uD83D\uDC9C \uD83D\uDDA4 \uD83D\uDC94 \uD83D\uDD25 \u2B50 \u2728 \uD83C\uDF89 \uD83C\uDF8A \uD83D\uDCAF \uD83D\uDCA5 \uD83D\uDCA1 \uD83C\uDF1F \uD83C\uDFC6 \uD83E\uDD47'],
+    ['\uD83D\uDE9A', 'Trabajo', '\uD83D\uDE9A \uD83D\uDE9B \uD83D\uDE9C \uD83D\uDE97 \uD83D\uDEE3\uFE0F \u26FD \uD83D\uDCE6 \uD83D\uDCCB \uD83D\uDCDD \uD83D\uDCC4 \uD83D\uDCC1 \uD83D\uDCC2 \uD83D\uDCCE \uD83D\uDCF7 \uD83D\uDCF8 \uD83D\uDDBC\uFE0F \uD83D\uDCCA \uD83D\uDCC8 \uD83D\uDCC9 \uD83D\uDCC5 \u23F0 \u231B \uD83D\uDCDE \uD83D\uDCF1 \uD83D\uDCBB \uD83D\uDDA8\uFE0F \uD83D\uDCE7 \uD83D\uDCE2 \uD83D\uDD0D \uD83D\uDD12 \uD83D\uDD11 \uD83D\uDCB0 \uD83E\uDDFE \uD83C\uDFED \uD83C\uDFE2 \uD83D\uDCCD \uD83D\uDDFA\uFE0F \u2615 \uD83C\uDF3E \uD83C\uDF31 \u2699\uFE0F'],
+    ['\u2705', 'Símbolos', '\u2705 \u274C \u2714\uFE0F \u2716\uFE0F \u26A0\uFE0F \u2757 \u2753 \u203C\uFE0F \uD83D\uDEAB \u26D4 \uD83D\uDD34 \uD83D\uDFE0 \uD83D\uDFE1 \uD83D\uDFE2 \uD83D\uDD35 \u26AA \u26AB \u2B06\uFE0F \u2B07\uFE0F \u27A1\uFE0F \u2B05\uFE0F \uD83D\uDD04 \uD83D\uDD01 \uD83C\uDD97 \uD83C\uDD95 \uD83D\uDD1D \uD83D\uDCAC \uD83D\uDCAD \uD83D\uDC40 \uD83D\uDE4B \uD83D\uDE45 \uD83E\uDD37 \uD83D\uDE4E \uD83D\uDE4D \u2600\uFE0F \uD83C\uDF27\uFE0F \u26C8\uFE0F \uD83C\uDF19']
+  ];
+  var emoTab = 0;
+  function renderEmoji() {
+    var tabs = $('chatEmojiTabs'), grid = $('chatEmojiGrid');
+    tabs.textContent = ''; grid.textContent = '';
+    EMO.forEach(function (c, i) {
+      var t = el('button', i === emoTab ? 'on' : '', c[0]); t.type = 'button'; t.title = c[1];
+      t.addEventListener('click', function () { emoTab = i; renderEmoji(); });
+      tabs.appendChild(t);
+    });
+    EMO[emoTab][2].split(' ').forEach(function (e) {
+      var b = el('button', '', e); b.type = 'button';
+      b.addEventListener('click', function () { insertEmoji(e); });
+      grid.appendChild(b);
+    });
+  }
+  function insertEmoji(e) {
+    var ta = $('chatInput'), a = ta.selectionStart || 0, z = ta.selectionEnd || 0;
+    if (ta.value.length + e.length > 1000) return;
+    ta.value = ta.value.slice(0, a) + e + ta.value.slice(z);
+    ta.focus(); ta.selectionStart = ta.selectionEnd = a + e.length;
+    ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+  }
+  function closeEmoji() { $('chatEmoji').classList.remove('show'); $('chatEmojiBtn').classList.remove('on'); }
+  $('chatEmojiBtn').addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    var box = $('chatEmoji'), on = !box.classList.contains('show');
+    if (on) renderEmoji();
+    box.classList.toggle('show', on); this.classList.toggle('on', on);
+  });
+  $('chatEmoji').addEventListener('click', function (ev) { ev.stopPropagation(); });
+  document.addEventListener('click', function (ev) {
+    if (!ev.target.closest || !ev.target.closest('#chatEmoji')) closeEmoji();
+  });
+
   $('chatSend').addEventListener('click', doSend);
   $('chatInput').addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
@@ -340,6 +503,7 @@
   function resetSession() {
     if (isOpen) { isOpen = false; panel.style.display = 'none'; navChat.classList.remove('active'); }
     me = null; users = []; msgs = []; seen = {}; lastId = 0; readTs = {}; active = 'group'; offline = false;
+    clearAttach(); closeEmoji();
     $('chatBadge').classList.remove('show');
     try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf(LS) === 0) localStorage.removeItem(k); }); } catch (e) {}
   }

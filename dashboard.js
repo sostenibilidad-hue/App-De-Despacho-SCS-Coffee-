@@ -619,3 +619,4 @@
   // Si pasados unos segundos no hay datos, se avisa en vez de quedarse cargando.
   setTimeout(function () { if (loading && isVisible() && !globalRecords()) { loading = false; errMsg = 'Revisa tu conexión e intenta de nuevo.'; render(); } }, 20000);
 })();
+

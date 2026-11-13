@@ -356,7 +356,12 @@
 
   function periodLabel(b) { return fmtLong(b.start) + ' – ' + fmtLong(b.end); }
 
+  // Solo el administrador ve el Panel de control.
+  function isAdmin() { try { return !!(currentUser && currentUser.rol === 'admin'); } catch (e) { return false; } }
+
   function render() {
+    if (!isAdmin()) { root.style.display = 'none'; root.innerHTML = ''; return; }
+    root.style.display = '';
     if (loading && !rows.length) {
       root.innerHTML = '<div class="d-head"><div><h2>Panel de control</h2><p>Cargando datos de despachos…</p></div></div>' +
         '<div class="d-kpis"><div class="d-skel"></div><div class="d-skel"></div><div class="d-skel"></div><div class="d-skel"></div></div>' +
@@ -581,7 +586,7 @@
     });
   }
   function exportCsv() {
-    if (!cache) return;
+    if (!cache || !isAdmin()) return;
     var list = tableData(cache), q = function (v) { v = String(v == null ? '' : v); return /[",\n;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
     var out = ['Código;Fecha;Placa;Lotes;Responsable;Fotos'].concat(list.map(function (r) {
       return [r.id, ymd(r.t), r.placa, r.lotesTxt, r.resp, pendingIds[r.id] ? 'Pendiente' : 'Completo'].map(q).join(';');
@@ -596,6 +601,8 @@
   /* ============================== Sincronía con app.js ============================== */
   function isVisible() { return hub.offsetParent !== null; }
   function check(force) {
+    if (!isAdmin()) { if (root.style.display !== 'none') render(); sig = ''; return; }
+    if (root.style.display === 'none') force = true; // acaba de entrar un admin
     var recs = globalRecords();
     if (!recs) { if (force) render(); return; }
     var pend = globalPending();

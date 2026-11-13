@@ -437,6 +437,11 @@
   .export-btn:active{ transform: scale(0.97); }
   .export-btn svg{ width:14px; height:14px; flex-shrink:0; }
   .export-btn.is-hidden{ display:none; }
+  /* Colaboradores: sin descargas ni exportaciones (solo el administrador) */
+  body:not(.is-admin) .export-btn,
+  body:not(.is-admin) .img-cell a.dl,
+  body:not(.is-admin) #lightboxDl,
+  body:not(.is-admin) #cscDash{ display:none !important; }
 
   .card{ background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 16px; box-shadow: 0 6px 18px rgba(61,36,18,0.05); }
   .field label{ display:block; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 5px; font-weight: 600; }
@@ -1070,11 +1075,11 @@ body{ height:auto; min-height:100vh; min-height:100dvh; background: linear-gradi
     return { setState: setState, glance: glance, turnHead: turnHead, resetHead: resetHead };
   })();
 </script>
-<script src="app.js?v=6"></script>
-<script src="sidebar.js?v=6"></script>
-<script src="dashboard.js?v=6"></script>
-<script src="editar-usuarios.js?v=6"></script>
-<script src="chat.js?v=6"></script>
+<script src="app.js?v=7"></script>
+<script src="sidebar.js?v=7"></script>
+<script src="dashboard.js?v=7"></script>
+<script src="editar-usuarios.js?v=7"></script>
+<script src="chat.js?v=7"></script>
 
 <script>
 /* Agrega "Cerrar sesión" al menú lateral del celular, usando el botón Salir original */

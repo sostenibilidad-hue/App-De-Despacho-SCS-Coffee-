@@ -26,11 +26,18 @@
     '.csc-side .logo-wide img{display:block;width:100%;height:auto;}',
     '.csc-side .app-header-titles h1{font-size:11.5px;line-height:1.25;margin:0;color:#E9D5BC;letter-spacing:.16em;text-transform:uppercase;text-align:center;font-weight:600;}',
     '.csc-badge-mini{display:none;width:44px;height:44px;border-radius:12px;background:#fff;padding:6px;box-shadow:0 4px 12px rgba(0,0,0,.25);}',
+    '.csc-side .csc-item.csc-sub{padding-left:38px;font-size:13.5px;font-weight:500;margin-bottom:2px;}',
+    '.csc-side .csc-item.csc-sub svg{width:16px;height:16px;}',
+    '.csc-side .csc-item.csc-parent.open{color:#fff;}',
+    '.csc-side .csc-item.csc-parent.open svg{color:#E9C98C;}',
+    '.csc-count{margin-left:auto;min-width:22px;height:20px;border-radius:10px;background:rgba(233,201,140,.22);color:#E9C98C;font-size:11.5px;font-weight:800;font-style:normal;display:inline-flex;align-items:center;justify-content:center;padding:0 7px;box-sizing:border-box;}',
+    '.csc-label-modulos{margin-top:8px;border-top:1px solid rgba(255,255,255,.12);padding-top:14px;}',
+    '#panel-hub .hub-grid{display:none;}',
     /* Barra que se oculta sola (solo computador): queda una franja de íconos */
     '@media (min-width:900px){',
     '  .csc-side.collapsed{width:72px;}',
     '  .csc-side.collapsed .logo-wide, .csc-side.collapsed .app-header-titles, .csc-side.collapsed .csc-item span, .csc-side.collapsed .icon-btn span,',
-    '  .csc-side.collapsed .csc-label, .csc-side.collapsed .csc-user > div:last-child{display:none;}',
+    '  .csc-side.collapsed .csc-label, .csc-side.collapsed .csc-count, .csc-side.collapsed .csc-user > div:last-child{display:none;}',
     '  .csc-side.collapsed .csc-badge-mini{display:block;margin:0 auto;}',
     '  .csc-side.collapsed .csc-item, .csc-side.collapsed .icon-btn{justify-content:center;padding:11px 0;border-left-width:0;}',
     '  .csc-side.collapsed .csc-user{justify-content:center;padding:8px 0 12px;}',
@@ -87,6 +94,7 @@
     list: ico('<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>'),
     users: ico('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 3-6 6.5-6s6.5 2.4 6.5 6"/><path d="M16 4.5a3.5 3.5 0 010 7M18 14.5c2 .6 3.5 2.5 3.5 5.5"/>'),
     out: ico('<path d="M9 4H5v16h4"/><path d="M16 8l4 4-4 4M20 12H9"/>'),
+    truck: ico('<rect x="1" y="6" width="14" height="10"/><path d="M15 9h4l3 3v4h-7z"/><circle cx="6" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>'),
     menu: ico('<path d="M4 6h16M4 12h16M4 18h16"/>')
   };
 
@@ -126,11 +134,23 @@
   }
 
   var navHome = navItem(I.home, 'Inicio');
+  var navDatos = navItem(I.truck, 'Datos');
+  navDatos.classList.add('csc-parent');
+  navDatos.insertAdjacentHTML('beforeend', '<i class="csc-count" id="cscCountDatos">—</i>');
   var navForm = navItem(I.plus, 'Nuevo reporte');
   var navGal = navItem(I.list, 'Registros guardados');
+  navForm.classList.add('csc-sub');
+  navGal.classList.add('csc-sub');
 
+  // MENÚ: accesos generales (el Chat se agrega aquí desde chat.js)
   side.appendChild(label('Menú'));
   side.appendChild(navHome);
+
+  // MÓDULOS: sección propia, separada del Panel de control
+  var lblMod = label('Módulos');
+  lblMod.classList.add('csc-label-modulos');
+  side.appendChild(lblMod);
+  side.appendChild(navDatos);
   side.appendChild(navForm);
   side.appendChild(navGal);
 
@@ -192,6 +212,7 @@
   }
 
   navHome.addEventListener('click', function () { goHome(); closeMenu(); sync(); });
+  navDatos.addEventListener('click', function () { if (!vis($('panel-group'))) openTab('form'); closeMenu(); sync(); });
   navForm.addEventListener('click', function () { openTab('form'); closeMenu(); sync(); });
   navGal.addEventListener('click', function () { openTab('gallery'); closeMenu(); sync(); });
   if (adminBtn) adminBtn.addEventListener('click', closeMenu);
@@ -209,6 +230,9 @@
     var tab = at ? at.getAttribute('data-tab') : '';
     setActive(navHome, hub && !admin && !group);
     setActive(navForm, group && tab === 'form');
+    if (navDatos.classList.contains('open') !== group) navDatos.classList.toggle('open', group);
+    var cd = $('countDatos'), cc = $('cscCountDatos');
+    if (cd && cc && cc.textContent !== cd.textContent) cc.textContent = cd.textContent;
     setActive(navGal, group && tab === 'gallery');
     setActive(adminBtn, admin);
 
@@ -242,7 +266,7 @@
   side.addEventListener('focusout', function () { scheduleCollapse(1500); });
   side.addEventListener('touchstart', expand, { passive: true });
   // Al elegir una opción se recoge enseguida, para dejar todo el espacio al trabajo.
-  [navHome, navForm, navGal, adminBtn].forEach(function (b) {
+  [navHome, navDatos, navForm, navGal, adminBtn].forEach(function (b) {
     if (b) b.addEventListener('click', function () { scheduleCollapse(600); });
   });
   // Al entrar a la app se muestra abierta unos segundos y luego se recoge.

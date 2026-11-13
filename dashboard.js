@@ -340,10 +340,6 @@
   var root = document.createElement('div');
   root.id = 'cscDash';
   hub.insertBefore(root, hub.firstChild);
-  var sep = document.createElement('div');
-  sep.className = 'd-sep';
-  sep.textContent = 'Módulos';
-  hub.insertBefore(sep, root.nextSibling);
   var tip = document.createElement('div');
   tip.id = 'dTip';
   document.body.appendChild(tip);

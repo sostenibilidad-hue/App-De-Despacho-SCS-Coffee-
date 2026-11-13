@@ -620,6 +620,8 @@ function showApp() {
   } else {
     document.getElementById('adminBtn').style.display = 'none';
   }
+  // Solo el administrador ve el Panel de control y puede descargar/exportar.
+  document.body.classList.toggle('is-admin', currentUser.rol === 'admin');
 
   goToHub();
   refreshHubCounts();
@@ -654,6 +656,7 @@ function logout() {
   if (floatBtn) floatBtn.classList.remove('show');
   document.getElementById('appScreen').style.display = 'none';
   document.getElementById('adminBtn').style.display = 'none'; // por si el usuario anterior era admin
+  document.body.classList.remove('is-admin');
   document.getElementById('loginScreen').style.display = 'flex';
   document.getElementById('loginCedula').value = '';
   document.getElementById('loginClave').value = '';
@@ -1232,6 +1235,9 @@ function setupLightbox() {
   });
 }
 
+/** Solo el administrador puede descargar archivos o exportar datos. */
+function isAdminUser() { return !!(currentUser && currentUser.rol === 'admin'); }
+
 function openLightbox(viewUrl, downloadUrl, name) {
   const overlay = document.getElementById('imgLightbox');
   const img = document.getElementById('lightboxImg');
@@ -1239,7 +1245,10 @@ function openLightbox(viewUrl, downloadUrl, name) {
   if (!overlay || !img) return;
   img.src = viewUrl;
   img.alt = name || '';
-  if (dl) { dl.href = downloadUrl || viewUrl; dl.download = name || ''; }
+  if (dl) {
+    if (isAdminUser()) { dl.href = downloadUrl || viewUrl; dl.download = name || ''; dl.style.display = ''; }
+    else { dl.removeAttribute('href'); dl.removeAttribute('download'); dl.style.display = 'none'; }
+  }
   overlay.classList.add('open');
 }
 
@@ -1532,6 +1541,7 @@ function buildDispatchWorkbook(ExcelJS, opts) {
  * visibles en "Registros guardados" (respeta el buscador). Si el generador de
  * Excel no se puede cargar (sin internet), cae a un CSV simple. */
 async function exportGalleryExcel() {
+  if (!isAdminUser()) { window.alert('Solo el administrador puede exportar o descargar.'); return; }
   const filtered = getFilteredRecords();
   if (!filtered.length) {
     window.alert('No hay reportes para exportar con el filtro actual.');
@@ -1666,7 +1676,7 @@ async function buildDocumentLink(rec) {
     if (!data.ok || !data.viewUrl) return null;
     const a = document.createElement('a');
     a.className = 'doc-link';
-    a.href = data.downloadUrl || data.viewUrl;
+    a.href = isAdminUser() ? (data.downloadUrl || data.viewUrl) : data.viewUrl; // colaboradores: solo ver
     a.target = '_blank';
     a.rel = 'noopener';
     a.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"></path></svg> Ver documento anexo';
@@ -1725,12 +1735,14 @@ async function loadImages(reportId, bodyEl, rec) {
         cell.appendChild(imgEl);
         cell.appendChild(buildPhotoDeleteButton(img, cell));
 
-        const dl = document.createElement('a');
-        dl.className = 'dl';
-        dl.href = img.downloadUrl;
-        dl.setAttribute('download', img.name);
-        dl.textContent = 'Descargar';
-        cell.appendChild(dl);
+        if (isAdminUser()) {
+          const dl = document.createElement('a');
+          dl.className = 'dl';
+          dl.href = img.downloadUrl;
+          dl.setAttribute('download', img.name);
+          dl.textContent = 'Descargar';
+          cell.appendChild(dl);
+        }
 
         grid.appendChild(cell);
       });

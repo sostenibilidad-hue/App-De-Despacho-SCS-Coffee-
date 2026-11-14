@@ -378,9 +378,34 @@
   }
 
   /* ---------------- Red ---------------- */
-  function api(params, attempts) {
+  /* Petición con tiempo máximo: si el servidor no responde, se corta (antes se quedaba colgada para siempre). */
+  function timedJson(url, opts, ms) {
+    var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, ms);
+    opts = opts || {};
+    if (ctl) opts.signal = ctl.signal;
+    return fetchJson(url, opts, 1).then(
+      function (d) { clearTimeout(timer); return d; },
+      function (e) { clearTimeout(timer); throw e; }
+    );
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function hasPending() { return msgs.some(function (m) { return m.temp; }); }
+  function api(params) {
     var q = Object.keys(params).map(function (k) { return k + '=' + enc(params[k]); }).join('&');
-    return fetchJson(WEB_APP_URL + '?' + q, undefined, attempts || 1);
+    return timedJson(WEB_APP_URL + '?' + q, undefined, 15000);
+  }
+
+  /* Si el servidor guardó el mensaje pero la respuesta se perdió o tardó, la propia consulta lo confirma. */
+  function reconcileOwn(m) {
+    for (var i = 0; i < msgs.length; i++) {
+      var t = msgs[i];
+      if ((t.temp || t.failed) && !t.done && t.de === me && String(t.texto || '') === String(m.texto || '') &&
+          t.tipo === m.tipo && String(t.para || '') === String(m.para || '') && (!!t.adjNombre === !!m.adjNombre)) {
+        t.done = true; msgs.splice(i, 1); return true;
+      }
+    }
+    return false;
   }
 
   /* Copia local: al abrir el chat los mensajes y la lista de personas salen al instante. */
@@ -419,6 +444,7 @@
   }
 
   async function poll() {
+    if (busy && Date.now() - lastPollAt > 30000) busy = false;   // seguro anti-atasco
     if (busy || !me) return;
     busy = true; lastPollAt = Date.now();
     try {
@@ -437,7 +463,10 @@
       if (!d.ok) throw new Error(d.error || 'Error');
       offline = false;
       var changed = false, incoming = [];
-      (d.messages || []).forEach(function (m) { if (addMsg(m)) { changed = true; if (m.de !== me) incoming.push(m); } });
+      (d.messages || []).forEach(function (m) {
+        if (m.de === me && reconcileOwn(m)) changed = true;
+        if (addMsg(m)) { changed = true; if (m.de !== me) incoming.push(m); }
+      });
       msgs.sort(function (a, b) { return a.ts - b.ts; });
       if (first && !localStorage.getItem(LS + me)) {
         // Primera vez en este equipo: el historial anterior no cuenta como "sin leer".
@@ -475,18 +504,34 @@
   function convTitle(m) { return m.tipo === 'grupo' ? 'Equipo CSC' : m.nombre; }
   function msgBody(m) { return (m.tipo === 'grupo' ? String(m.nombre).split(' ')[0] + ': ' : '') + (m.texto || (m.adjNombre ? attLabel(m) : 'Mensaje nuevo')); }
 
+  /* Aviso genérico (lo usa app.js para "Nuevo despacho"): sonido + mensaje flotante / notificación del sistema. */
+  function notifyGeneric(title, body, fn) {
+    beep();
+    if (document.hidden) {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        var o = { body: body, icon: 'icon-192.png', badge: 'icon-192.png', tag: 'csc-despacho', renotify: true, vibrate: [200, 100, 200], data: { conv: '' } };
+        var fb = function () { try { var n = new Notification(title, o); n.onclick = function () { window.focus(); if (fn) fn(); n.close(); }; } catch (e) {} };
+        if (swReg && swReg.showNotification) swReg.showNotification(title, o).catch(fb); else fb();
+      }
+    } else showToastRaw(title, body, fn);
+  }
+
   function showToast(m) {
+    showToastRaw(convTitle(m), msgBody(m), function () { openConv(convOf(m)); });
+  }
+
+  function showToastRaw(title, body, fn) {
     var t = $('chatToast');
     if (!t) {
       t = el('div', 'chat-toast'); t.id = 'chatToast';
       document.body.appendChild(t);
-      t.addEventListener('click', function () { t.classList.remove('show'); if (t._conv) openConv(t._conv); });
+      t.addEventListener('click', function () { t.classList.remove('show'); if (t._fn) t._fn(); });
     }
     t.textContent = '';
     t.appendChild(el('div', '', '\uD83D\uDCAC'));
-    var box = el('div'); box.appendChild(el('b', '', convTitle(m))); box.appendChild(el('span', '', msgBody(m)));
+    var box = el('div'); box.appendChild(el('b', '', title)); box.appendChild(el('span', '', body));
     t.appendChild(box);
-    t._conv = convOf(m);
+    t._fn = fn;
     t.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.classList.remove('show'); }, 6000);
@@ -563,15 +608,25 @@
       msgs.push(temp);
     } else { temp.failed = false; temp.temp = true; }
     renderList(); renderThread(true);
+    setTimeout(function () { if (me) poll(); }, 2000);   // confirma pronto aunque la respuesta del envío tarde
     try {
-      var d = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action: 'chatSend', cedula: me, cid: temp.cid, tipo: temp.tipo, para: temp.para, texto: temp.texto, file: temp.file ? { base64: temp.file.base64, mimeType: temp.file.mimeType, filename: temp.file.filename } : undefined }) }, 2);
-      if (!d.ok) throw new Error(d.error || 'Error');
-      msgs = msgs.filter(function (m) { return m !== temp; });
-      addMsg(d.message);
-      msgs.sort(function (a, b) { return a.ts - b.ts; });
-      markRead(convOf(d.message));
+      var body = JSON.stringify({ action: 'chatSend', cedula: me, cid: temp.cid, tipo: temp.tipo, para: temp.para, texto: temp.texto, file: temp.file ? { base64: temp.file.base64, mimeType: temp.file.mimeType, filename: temp.file.filename } : undefined });
+      var d = null, lastErr = null, wait = temp.file ? 60000 : 20000;
+      for (var i = 0; i < 3 && !temp.done && !d; i++) {
+        try { d = await timedJson(WEB_APP_URL, { method: 'POST', body: body }, wait); }
+        catch (err) { lastErr = err; if (!temp.done) await sleep(700); }
+      }
+      if (!temp.done) {
+        if (!d) throw lastErr || new Error('Error');
+        if (!d.ok) throw new Error(d.error || 'Error');
+        msgs = msgs.filter(function (m) { return m !== temp; });
+        addMsg(d.message);
+        msgs.sort(function (a, b) { return a.ts - b.ts; });
+        markRead(convOf(d.message));
+      }
       saveLocal();
     } catch (e) {
+      if (temp.done) { renderList(); renderThread(true); return; }
       temp.temp = false; temp.failed = true;
       if (e && /archivo|tipo|MB/i.test(String(e.message))) temp.errMsg = String(e.message);
     }
@@ -709,7 +764,7 @@
     if (!isOpen) openChat();
     selectConv(conv || 'group');
   }
-  window.cscChat = { unreadItems: unreadItems, open: openConv };
+  window.cscChat = { unreadItems: unreadItems, open: openConv, notify: notifyGeneric };
 
   // Cualquier otro botón del menú (o el "volver" flotante) cierra el chat primero.
   side.addEventListener('click', function (e) {
@@ -824,7 +879,7 @@
     }
     var hidden = document.hidden;
     // También en segundo plano se consulta (más espaciado) para poder avisar de mensajes nuevos.
-    poll().then(function () { setTimeout(tick, hidden ? 20000 : (isOpen ? 3000 : 8000)); });
+    poll().then(function () { setTimeout(tick, hasPending() ? 1500 : (hidden ? 20000 : (isOpen ? 3000 : 8000))); });
   }
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || !me) return;

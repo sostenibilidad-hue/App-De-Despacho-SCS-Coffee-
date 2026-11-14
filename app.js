@@ -224,6 +224,7 @@ function setReportPending(reportId, isPending) {
 function addLocalRecord(rec, willHavePhotos) {
   if (!recordsCache[GROUP]) return; // aún no se ha cargado nada: la próxima carga lo traerá
   recordsCache[GROUP].unshift(rec);
+  markReportSeen(rec['Id_Reporte']);   // un reporte que creo yo no me avisa a mí
   if (!willHavePhotos) setReportPending(rec['Id_Reporte'], true);
   persistData();
   renderPendingUI();
@@ -696,6 +697,7 @@ function showApp() {
 
   goToHub();
   refreshHubCounts();
+  startReportPolling();
 }
 
 /* En el celular, un usuario que NO es administrador no tiene panel de control: su
@@ -726,6 +728,7 @@ function logout() {
   dataSyncedAt = 0;
   adminCache = null;
   galleryRenderedSig = '';
+  seenReports = null; alertedReports = {};
   cacheClear(); // equipo compartido: al salir no queda información en el navegador
   renderNotifBadge();
   const notifPanel = document.getElementById('notifPanel');
@@ -973,6 +976,80 @@ function allPendingPhotos() {
   return Object.keys(pendingPhotosCache).reduce((acc, g) => acc.concat(pendingPhotosCache[g] || []), []);
 }
 
+/* ------------------------- NUEVOS DESPACHOS (solo administrador) -------------------------
+ * Cada reporte nuevo que crea otra persona aparece en la campana hasta que el
+ * administrador lo abre o pulsa "Marcar vistos". Los ya existentes la primera
+ * vez en este equipo no cuentan como nuevos. */
+let seenReports = null;      // { idReporte: 1 } ya vistos (null = aún no se ha cargado)
+let alertedReports = {};     // ids ya avisados con sonido en esta sesión
+let reportPollTimer = null, reportPollBusy = false;
+
+function seenKey() { return 'csc_seen_reports:' + (currentUser && currentUser.cedula); }
+function loadSeen() {
+  try { const raw = localStorage.getItem(seenKey()); seenReports = raw ? JSON.parse(raw) : null; }
+  catch (e) { seenReports = null; }
+}
+function saveSeen() { try { localStorage.setItem(seenKey(), JSON.stringify(seenReports || {})); } catch (e) {} }
+function markReportSeen(id) {
+  if (!seenReports) return;
+  seenReports[String(id)] = 1; saveSeen();
+}
+
+function newDispatchItems() {
+  if (!currentUser || currentUser.rol !== 'admin') return [];
+  const recs = recordsCache[GROUP];
+  if (!recs) return [];
+  if (!seenReports) loadSeen();
+  if (!seenReports) {                       // primera vez: lo que ya existe no es "nuevo"
+    seenReports = {};
+    recs.forEach(r => { seenReports[String(r['Id_Reporte'])] = 1; });
+    saveSeen();
+    return [];
+  }
+  const me = String(currentUser.nombre || '').trim().toLowerCase();
+  return recs
+    .filter(r => !seenReports[String(r['Id_Reporte'])] &&
+      String(r['Nom: Del Respnsable del Despacho '] || '').trim().toLowerCase() !== me)
+    .map(pendingItemFor);
+}
+
+function startReportPolling() {
+  if (reportPollTimer) return;
+  reportPollTimer = setInterval(pollReports, 25000);
+}
+
+/* Cada 25 s el administrador revisa si hay despachos nuevos (usa la caché del servidor: es barato). */
+async function pollReports() {
+  if (reportPollBusy || submitting || syncInFlight) return;
+  if (!currentUser || currentUser.rol !== 'admin' || !recordsCache[GROUP]) return;
+  reportPollBusy = true;
+  try {
+    const init = await fetchJson(WEB_APP_URL + '?action=init', undefined, 1);
+    if (!init.ok || !currentUser) return;
+    const recs = init.records || [];
+    const cur = recordsCache[GROUP] || [];
+    const sig = a => a.length + '|' + (a[0] ? a[0]['Id_Reporte'] : '') + '|' + (a[a.length - 1] ? a[a.length - 1]['Id_Reporte'] : '');
+    if (sig(recs) === sig(cur) && (init.pending || []).length === (pendingPhotosCache[GROUP] || []).length) return;
+    const before = {};
+    cur.forEach(r => { before[String(r['Id_Reporte'])] = 1; });
+    applyData(recs, init.pending, Date.now());
+    persistData();
+    updateHubCount();
+    const fresh = newDispatchItems().filter(i => !before[String(i.id)] && !alertedReports[String(i.id)]);
+    fresh.forEach(i => { alertedReports[String(i.id)] = 1; });
+    renderPendingUI();
+    if (fresh.length && window.cscChat && window.cscChat.notify) {
+      const f = fresh[0];
+      window.cscChat.notify(
+        fresh.length > 1 ? fresh.length + ' despachos nuevos' : 'Nuevo despacho',
+        (f.placa || 'Sin placa') + ' · ' + (f.responsable || 'Sin responsable'),
+        () => { markReportSeen(f.id); goToPendingReport(f); renderPendingUI(); }
+      );
+    }
+  } catch (e) { /* sin conexión: se reintenta en la próxima vuelta */ }
+  finally { reportPollBusy = false; }
+}
+
 /* Conversaciones del chat con mensajes sin leer (las aporta chat.js). */
 function chatNotifItems() {
   try { return (window.cscChat && window.cscChat.unreadItems()) || []; } catch (e) { return []; }
@@ -982,7 +1059,7 @@ function renderNotifBadge() {
   const badge = document.getElementById('notifBadge');
   const btn = document.getElementById('notifBtn');
   if (!badge || !btn) return;
-  const total = allPendingPhotos().length + chatNotifItems().reduce((a, c) => a + c.count, 0);
+  const total = allPendingPhotos().length + newDispatchItems().length + chatNotifItems().reduce((a, c) => a + c.count, 0);
   if (total > 0) {
     badge.textContent = total > 99 ? '99+' : String(total);
     badge.style.display = 'flex';
@@ -1051,9 +1128,10 @@ function renderNotifPanel() {
   if (!panel) return;
   const all = allPendingPhotos();
   const chats = chatNotifItems();
+  const news = newDispatchItems();
 
-  if (!all.length && !chats.length) {
-    panel.innerHTML = '<div class="notif-empty">🎉 Sin pendientes: no hay mensajes nuevos y todos los reportes tienen fotos.</div>';
+  if (!all.length && !chats.length && !news.length) {
+    panel.innerHTML = '<div class="notif-empty">🎉 Sin pendientes: no hay mensajes ni despachos nuevos y todos los reportes tienen fotos.</div>';
     return;
   }
 
@@ -1077,6 +1155,30 @@ function renderNotifPanel() {
         panel.classList.remove('open');
         if (window.cscChat) window.cscChat.open(c.conv);
       });
+      listEl.appendChild(row);
+    });
+  }
+  if (news.length) {
+    const t = document.createElement('div');
+    t.className = 'notif-title';
+    t.style.display = 'flex'; t.style.justifyContent = 'space-between'; t.style.alignItems = 'center';
+    t.innerHTML = '<span>Despachos nuevos (' + news.length + ')</span>';
+    const clr = document.createElement('button');
+    clr.type = 'button'; clr.textContent = 'Marcar vistos';
+    clr.style.cssText = 'border:none;background:none;color:#6B3F1D;font-weight:700;font-size:12px;cursor:pointer;text-decoration:underline;font-family:inherit;';
+    clr.addEventListener('click', (e) => { e.stopPropagation(); news.forEach(n => markReportSeen(n.id)); renderPendingUI(); });
+    t.appendChild(clr);
+    listEl.appendChild(t);
+    news.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'notif-item';
+      row.innerHTML =
+        '<div style="min-width:0;">' +
+          '<div class="notif-item-plate">🚚 ' + escapeHtml(item.placa || 'Sin placa') + '</div>' +
+          '<div class="notif-item-meta">' + escapeHtml(formatDate(item.fecha)) + ' · ' + escapeHtml(item.responsable || 'Sin responsable') + '</div>' +
+        '</div>' +
+        '<span class="notif-count">NUEVO</span>';
+      row.addEventListener('click', () => { markReportSeen(item.id); goToPendingReport(item); renderPendingUI(); });
       listEl.appendChild(row);
     });
   }

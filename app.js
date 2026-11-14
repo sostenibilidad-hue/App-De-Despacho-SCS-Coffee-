@@ -9,6 +9,10 @@ const GROUP_LABELS = { datos: 'Datos' };
 
 let currentGroup = null;
 let extraFilesData = [];
+let mainFilePending = null;   // promesa de la compresión del documento anexo
+let submitting = false;       // true mientras se guarda: bloquea el doble toque
+let currentSubmitId = null;   // identificador del reporte que se está guardando (anti-duplicados)
+let currentSubmitSig = '';
 let recordsCache = { datos: null };
 let currentUser = null;
 let editingId = null;
@@ -63,6 +67,17 @@ function cacheGet(key) {
   } catch (e) { return null; }
 }
 
+/** Devuelve la entrada aunque ya haya vencido (no la borra): sirve para mostrar
+ *  datos al instante mientras se renuevan en segundo plano. */
+function cacheGetStale(key) {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    return (o && typeof o.t === 'number') ? o : null;
+  } catch (e) { return null; }
+}
+
 function cacheSet(key, data, t) {
   const payload = JSON.stringify({ t: t || Date.now(), d: data });
   try { localStorage.setItem(CACHE_PREFIX + key, payload); }
@@ -90,6 +105,7 @@ function cacheClear(prefix) {
 
 let dataSyncedAt = 0;
 let syncInFlight = null;
+let dataVersion = 0; // sube cada vez que cambian los datos en memoria (evita redibujos innecesarios)
 
 function dataIsFresh() {
   return !!recordsCache[GROUP] && (Date.now() - dataSyncedAt) < CACHE_TTL_MS;
@@ -99,10 +115,12 @@ function applyData(records, pending, t) {
   recordsCache[GROUP] = records;
   pendingPhotosCache[GROUP] = (pending || []).map(p => Object.assign({ group: GROUP }, p));
   dataSyncedAt = t;
+  dataVersion++;
 }
 
 /** Guarda en el navegador el estado actual (después de cambios locales). */
 function persistData() {
+  dataVersion++;
   if (!recordsCache[GROUP]) return;
   cacheSet('records', recordsCache[GROUP], dataSyncedAt);
   cacheSet('pending', pendingPhotosCache[GROUP], dataSyncedAt);
@@ -116,6 +134,18 @@ async function syncData(force) {
     if (dataIsFresh()) return;
     const rec = cacheGet('records'), pen = cacheGet('pending');
     if (rec && pen) { applyData(rec.d, pen.d, Math.min(rec.t, pen.t)); return; }
+    // Caché vencida (más de 6 h): se muestra lo último que se tenía AL INSTANTE
+    // y se renueva por detrás, en vez de dejar la pantalla esperando al servidor.
+    if (!recordsCache[GROUP]) {
+      const sr = cacheGetStale('records'), sp = cacheGetStale('pending');
+      if (sr && sp) {
+        applyData(sr.d, sp.d, Math.min(sr.t, sp.t));
+        syncData(true).then(() => {
+          try { updateHubCount(); renderPendingUI(); if (currentGroup) renderGallery(); } catch (e) {}
+        }).catch(() => {});
+        return;
+      }
+    }
     if (syncInFlight) return syncInFlight;
   } else if (syncInFlight) {
     try { await syncInFlight; } catch (e) {}
@@ -236,7 +266,7 @@ function updateCacheInfo() {
  * el formulario. Las fotos suben después, 3 a la vez, mostrando el avance
  * abajo. Si alguna falla se reintenta sola y, si aun así no sube, aparece
  * un aviso con botón "Reintentar". */
-const PHOTO_CONCURRENCY = 3;
+const PHOTO_CONCURRENCY = 5;
 const photoQueue = [];
 const uploadedByReport = {};
 let photoActive = 0;
@@ -248,14 +278,46 @@ function uploadsPending() {
   return photoActive > 0 || photoQueue.length > 0 || photoRetrying > 0 || uploadStats.failed.length > 0;
 }
 
+/** Identificador corto generado en el navegador (letra a–f + 7 hex, igual que el del servidor).
+ *  Va con cada envío: si un envío se repite (reintento, doble toque, respuesta perdida),
+ *  el servidor reconoce el mismo identificador y NO crea el registro otra vez. */
+function newClientId() {
+  const b = new Uint8Array(4);
+  (window.crypto || window.msCrypto).getRandomValues(b);
+  const hex = Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('').substr(0, 7);
+  return 'abcdef'.charAt(b[0] % 6) + hex;
+}
+
 function enqueuePhotos(reportId, meta, files, startSeq) {
   files.forEach((file, i) => {
-    photoQueue.push({ reportId, meta, file, seq: startSeq != null ? startSeq + i : null, attempts: 0, tried: false });
+    photoQueue.push({ kind: 'photo', imgId: newClientId(), reportId, meta, file, seq: startSeq != null ? startSeq + i : null, attempts: 0, tried: false });
   });
   uploadStats.total += files.length;
   clearTimeout(toastTimer);
   renderUploadToast();
   pumpPhotos();
+}
+
+/** El documento anexo también sube en segundo plano: guardar el reporte ya no espera a Drive. */
+function enqueueDocument(reportId, meta, file) {
+  photoQueue.unshift({ kind: 'doc', reportId, meta, file, seq: null, attempts: 0, tried: false });
+  uploadStats.total += 1;
+  clearTimeout(toastTimer);
+  renderUploadToast();
+  pumpPhotos();
+}
+
+let persistTimer = null;
+/** Guarda la caché en el navegador sin hacerlo una vez por cada foto (escribir todo el listado es lento). */
+function persistDataSoon() {
+  dataVersion++;
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(persistData, 500);
+}
+
+function setLocalDocPath(reportId, path) {
+  const rec = (recordsCache[GROUP] || []).find(r => String(r['Id_Reporte']) === String(reportId));
+  if (rec && path) rec['Documentos Anexos'] = path;
 }
 
 function pumpPhotos() {
@@ -269,20 +331,29 @@ function pumpPhotos() {
 
 async function uploadPhotoTask(task) {
   try {
-    const body = { action: 'addImage', group: GROUP, reportId: task.reportId, file: task.file, meta: task.meta };
+    const isDoc = task.kind === 'doc';
+    const body = isDoc
+      ? { action: 'attachDocument', group: GROUP, id: task.reportId, file: task.file, meta: task.meta }
+      : { action: 'addImage', group: GROUP, reportId: task.reportId, file: task.file, meta: task.meta, imgId: task.imgId };
     // El número NN solo se usa en el primer intento; en reintentos el servidor
     // pone un sufijo único, para no duplicar nombres si el 1.º sí había llegado.
-    if (task.seq != null && !task.tried) body.seq = task.seq;
+    // (imgId viaja siempre igual: si el 1.º sí llegó, el servidor lo reconoce y no repite la foto.)
+    if (!isDoc && task.seq != null && !task.tried) body.seq = task.seq;
     task.tried = true;
     const res = await fetch(WEB_APP_URL, { method: 'POST', body: JSON.stringify(body) });
     if (!res.ok) throw new Error('estado ' + res.status);
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || 'Error desconocido');
     uploadStats.done++;
-    cacheRemove('imgs:' + task.reportId);
-    uploadedByReport[task.reportId] = (uploadedByReport[task.reportId] || 0) + 1;
-    setReportPending(task.reportId, false);
-    persistData();
+    if (isDoc) {
+      setLocalDocPath(task.reportId, data.result && data.result.path);
+      cacheClear('doc:');
+    } else {
+      cacheRemove('imgs:' + task.reportId);
+      uploadedByReport[task.reportId] = (uploadedByReport[task.reportId] || 0) + 1;
+      setReportPending(task.reportId, false);
+    }
+    persistDataSoon();
   } catch (err) {
     task.attempts++;
     if (task.attempts < 3) {
@@ -298,7 +369,7 @@ async function uploadPhotoTask(task) {
 function finishUploads() {
   // Reportes que quedaron sin NINGUNA foto subida vuelven a la campana.
   const ids = {};
-  uploadStats.failed.forEach(t => { ids[t.reportId] = true; });
+  uploadStats.failed.forEach(t => { if (t.kind !== 'doc') ids[t.reportId] = true; });
   Object.keys(ids).forEach(id => { if (!uploadedByReport[id]) setReportPending(id, true); });
   persistData();
   renderPendingUI();
@@ -333,18 +404,18 @@ function renderUploadToast() {
   if (failed.length && settled) {
     el.className = 'upload-toast show err';
     el.innerHTML =
-      '<div class="ut-text">⚠ ' + failed.length + ' foto(s) no se pudieron subir.</div>' +
+      '<div class="ut-text">⚠ ' + failed.length + ' archivo(s) no se pudieron subir.</div>' +
       '<div class="ut-actions"><button type="button" id="utRetry">Reintentar</button><button type="button" id="utDiscard" class="ghost">Descartar</button></div>';
     document.getElementById('utRetry').addEventListener('click', retryFailedPhotos);
     document.getElementById('utDiscard').addEventListener('click', discardFailedPhotos);
   } else if (settled) {
     el.className = 'upload-toast show ok';
-    el.innerHTML = '<div class="ut-text">✓ ' + done + ' foto(s) subidas correctamente.</div>';
+    el.innerHTML = '<div class="ut-text">✓ ' + done + ' archivo(s) subidos correctamente.</div>';
   } else {
     const pct = Math.round(((done + failed.length) / total) * 100);
     el.className = 'upload-toast show';
     el.innerHTML =
-      '<div class="ut-text"><span class="spinner dark"></span>Subiendo fotos… ' + done + ' de ' + total + '</div>' +
+      '<div class="ut-text"><span class="spinner dark"></span>Subiendo archivos… ' + done + ' de ' + total + '</div>' +
       '<div class="ut-bar"><div class="ut-bar-fill" style="width:' + pct + '%"></div></div>';
   }
 }
@@ -644,6 +715,8 @@ function logout() {
   recordsCache = { datos: null };
   pendingPhotosCache = { datos: [] };
   dataSyncedAt = 0;
+  adminCache = null;
+  galleryRenderedSig = '';
   cacheClear(); // equipo compartido: al salir no queda información en el navegador
   renderNotifBadge();
   const notifPanel = document.getElementById('notifPanel');
@@ -705,6 +778,10 @@ function setupApp() {
     if (mainFile.files.length) {
       document.getElementById('mainFileLabel').textContent = mainFile.files[0].name;
       mainFileRow.classList.add('has-file');
+      // Se comprime desde ya, mientras la persona termina de llenar el formulario:
+      // al pulsar "Guardar" ya está listo y no hay espera.
+      mainFilePending = compressImageFile(mainFile.files[0]);
+      mainFilePending.catch(() => {});
     }
   });
 
@@ -718,12 +795,22 @@ function setupApp() {
     // una foto"). Ahora se puede tocar varias veces (o elegir varias de
     // una sola vez desde la galería) y todas se van sumando, sin límite.
     const label = document.getElementById('extraFileLabel');
-    const nuevas = Array.from(extraFiles.files);
+    const nuevasTodas = Array.from(extraFiles.files);
     extraFiles.value = ''; // limpia el input para poder volver a elegir/tomar más fotos
+    // Una foto ya elegida (mismo nombre, tamaño y fecha) no se agrega dos veces.
+    const keyOf = f => [f.name, f.size, f.lastModified].join('|');
+    const vistas = {};
+    extraFilesData.forEach(f => { if (f.key) vistas[f.key] = true; });
+    const nuevas = nuevasTodas.filter(f => { const k = keyOf(f); if (vistas[k]) return false; vistas[k] = true; return true; });
+    if (nuevas.length < nuevasTodas.length) {
+      const st = document.getElementById('formStatus');
+      if (st) { st.className = 'status err'; st.textContent = 'Se omitieron ' + (nuevasTodas.length - nuevas.length) + ' foto(s) repetida(s).'; }
+    }
     let hechas = 0;
     // Se optimizan 3 fotos a la vez (antes era una por una): mucho más rápido.
     const listas = await mapLimit(nuevas, 3, async (file) => {
       const fileData = await compressImageFile(file);
+      fileData.key = keyOf(file);
       hechas++;
       if (nuevas.length > 1) label.textContent = 'Optimizando fotos… ' + hechas + ' de ' + nuevas.length;
       return fileData;
@@ -1059,8 +1146,34 @@ function compressImageFile(file, maxDim, quality) {
 
 /* ------------------------- FORMULARIO (crear / editar) ------------------------- */
 
+/** Envoltorio anti doble toque: el primer toque bloquea todo lo demás hasta terminar. */
 async function onSubmit(e) {
   e.preventDefault();
+  if (submitting) return;            // segundo toque (o Enter) mientras guarda: se ignora
+  submitting = true;
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  try { await submitReport(); }
+  finally { submitting = false; btn.disabled = false; }
+}
+
+/** ¿Ya existe un reporte con la misma fecha, placa y lotes? (devuelve ese reporte) */
+function findDuplicateRecord(fecha, placa, lotes, excludeId) {
+  const dayKey = v => {
+    const d = new Date(v);
+    return isNaN(d) ? String(v) : d.getUTCFullYear() + '-' + (d.getUTCMonth() + 1) + '-' + d.getUTCDate();
+  };
+  const norm = v => String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, '');
+  const fk = dayKey(fecha), pk = norm(placa), lk = norm(lotes);
+  return (recordsCache[GROUP] || []).find(r =>
+    String(r['Id_Reporte']) !== String(excludeId || '') &&
+    norm(r['Placa Del Vehiculo ']) === pk &&
+    norm(r['Numero De Lotes ']) === lk &&
+    dayKey(r['Fecha ']) === fk
+  ) || null;
+}
+
+async function submitReport() {
   const statusEl = document.getElementById('formStatus');
   const submitBtn = document.getElementById('submitBtn');
   const submitLabel = document.getElementById('submitBtnLabel');
@@ -1074,6 +1187,14 @@ async function onSubmit(e) {
   if (!fecha || !placa || !lotes || !responsable) {
     statusEl.className = 'status err';
     statusEl.textContent = 'Completa todos los campos antes de guardar.';
+    return;
+  }
+
+  // Anti-duplicados: misma fecha + placa + lotes que un reporte ya guardado.
+  const dup = findDuplicateRecord(fecha, placa, lotes, editingId);
+  if (dup) {
+    statusEl.className = 'status err';
+    statusEl.textContent = 'Ya existe un reporte con esa fecha, placa y lotes (código ' + dup['Id_Reporte'] + '). No se guardó para evitar duplicados.';
     return;
   }
 
@@ -1099,7 +1220,7 @@ async function onSubmit(e) {
     const mainFileInput = document.getElementById('mainFile');
     if (mainFileInput.files.length) {
       const f = mainFileInput.files[0];
-      mainFileData = await compressImageFile(f);
+      mainFileData = await (mainFilePending || compressImageFile(f)); // normalmente ya está lista
     }
 
     const fields = {
@@ -1112,9 +1233,13 @@ async function onSubmit(e) {
     const isEdit = !!editingId;
     const photos = extraFilesData.slice(); // las fotos suben aparte, en segundo plano
     // Solo viajan los DATOS (+ documento anexo): la petición es pequeña y rápida.
+    // Identificador propio de este guardado: si por cualquier motivo el envío se repite,
+    // el servidor lo reconoce y no crea el reporte dos veces.
+    const sig = [fecha, placa.toUpperCase(), lotes, responsable].join('|');
+    if (!isEdit && (!currentSubmitId || currentSubmitSig !== sig)) { currentSubmitId = newClientId(); currentSubmitSig = sig; }
     const payload = isEdit
       ? { action: 'update', group: currentGroup, id: editingId, fields }
-      : { action: 'create', group: currentGroup, fields, file: mainFileData };
+      : { action: 'create', group: currentGroup, id: currentSubmitId, fields }; // el documento sube después, en segundo plano
 
     // IMPORTANTE: a propósito este envío NO usa fetchJson() (que reintenta
     // automáticamente). Guardar un reporte no es una operación segura de
@@ -1145,11 +1270,13 @@ async function onSubmit(e) {
         'Documentos Anexos': (data.result && data.result.mainFilePath) || ''
       }, photos.length > 0);
     }
+    if (!isEdit && mainFileData) enqueueDocument(reportId, meta, mainFileData);
     if (photos.length) enqueuePhotos(reportId, meta, photos, startSeq);
+    currentSubmitId = null; currentSubmitSig = '';
 
     statusEl.className = 'status ok';
     statusEl.textContent = (isEdit ? 'Reporte actualizado correctamente.' : 'Reporte guardado correctamente.') +
-      (photos.length ? ' Las fotos se están subiendo…' : '');
+      ((photos.length || (!isEdit && mainFileData)) ? ' Los archivos se están subiendo…' : '');
     resetForm();
     updateHubCount();
   } catch (err) {
@@ -1176,6 +1303,7 @@ function resetForm() {
   document.getElementById('responsable').value = '';
 
   document.getElementById('mainFile').value = '';
+  mainFilePending = null;
   document.getElementById('mainFileLabel').textContent = 'Toca para tomar foto o adjuntar archivo';
   document.getElementById('mainFileRow').classList.remove('has-file');
 
@@ -1259,6 +1387,12 @@ function closeLightbox() {
 
 /* ------------------------- GALERÍA ------------------------- */
 
+let galleryRenderedSig = '';
+function gallerySig() {
+  const q = (document.getElementById('gallerySearch') || { value: '' }).value.trim().toLowerCase();
+  return [currentGroup, dataVersion, q].join('|');
+}
+
 async function loadGallery() {
   const listEl = document.getElementById('galleryList');
   // Con caché (memoria o navegador, menos de 6 h) se muestra al instante.
@@ -1266,7 +1400,10 @@ async function loadGallery() {
   if (!hasLocal) listEl.innerHTML = '<div class="loading"><span class="spinner dark"></span>Cargando reportes…</div>';
   try {
     await syncData(false);
-    renderGallery();
+    // Si la lista ya está dibujada y nada cambió, se deja tal cual (conserva
+    // scroll, reportes abiertos y fotos ya cargadas): cero trabajo al cambiar de pestaña.
+    if (galleryRenderedSig === gallerySig() && listEl.children.length) updateCacheInfo();
+    else renderGallery();
   } catch (err) {
     listEl.innerHTML =
       '<div class="empty">No se pudieron cargar los reportes: ' + escapeHtml(err.message) +
@@ -1289,6 +1426,7 @@ function renderGallery() {
     return placa.indexOf(query) !== -1 || resp.indexOf(query) !== -1 || lotes.indexOf(query) !== -1 || codigo.indexOf(query) !== -1;
   });
 
+  galleryRenderedSig = gallerySig();
   if (!filtered.length) {
     listEl.innerHTML = '<div class="empty">No hay reportes para mostrar.</div>';
     return;
@@ -1877,26 +2015,57 @@ async function deleteReport(reportId, triggerBtn) {
 
 /* ------------------------- ADMIN ------------------------- */
 
-async function loadAdmin() {
+/* Caché del panel Usuarios (en memoria): al abrirlo se muestra al instante lo
+ * último que se vio y solo se renueva por detrás si pasaron más de 2 minutos.
+ * Cualquier cambio hecho aquí (autorizar, rechazar, editar) la invalida. */
+let adminCache = null; // { t, pending, users }
+const ADMIN_REVALIDATE_MS = 2 * 60 * 1000;
+function adminCacheClear() { adminCache = null; }
+
+function paintAdmin(c) {
+  renderPending(c.pending);
+  renderAllUsers(c.users);
+}
+
+async function fetchAdminData() {
+  const ced = encodeURIComponent(currentUser.cedula);
+  try {
+    const d = await fetchJson(WEB_APP_URL + '?action=adminUsers&adminCedula=' + ced);
+    if (d.ok) return { t: Date.now(), pending: d.pending, users: d.users };
+    if (String(d.error || '').indexOf('Acción no reconocida') === -1) throw new Error(d.error || 'Error desconocido');
+  } catch (e) {
+    if (String(e.message || '').indexOf('Acción no reconocida') === -1) throw e;
+  }
+  // Backend antiguo (sin "adminUsers"): se piden las dos listas en paralelo.
+  const [p, u] = await Promise.all([
+    fetchJson(WEB_APP_URL + '?action=listPendingUsers&adminCedula=' + ced),
+    fetchJson(WEB_APP_URL + '?action=listUsers&adminCedula=' + ced)
+  ]);
+  if (!p.ok) throw new Error(p.error || 'Error desconocido');
+  if (!u.ok) throw new Error(u.error || 'Error desconocido');
+  return { t: Date.now(), pending: p.users, users: u.users };
+}
+
+async function loadAdmin(force) {
   const pendingEl = document.getElementById('pendingList');
   const allEl = document.getElementById('allUsersList');
-  pendingEl.innerHTML = '<div class="loading"><span class="spinner dark"></span>Cargando…</div>';
-  allEl.innerHTML = '<div class="loading"><span class="spinner dark"></span>Cargando…</div>';
 
-  try {
-    const data = await fetchJson(WEB_APP_URL + '?action=listPendingUsers&adminCedula=' + encodeURIComponent(currentUser.cedula));
-    if (!data.ok) throw new Error(data.error || 'Error desconocido');
-    renderPending(data.users);
-  } catch (err) {
-    pendingEl.innerHTML = '<div class="empty">' + err.message + '</div>';
+  if (adminCache && !force) {
+    paintAdmin(adminCache); // instantáneo
+    if (Date.now() - adminCache.t < ADMIN_REVALIDATE_MS) return;
+  } else {
+    pendingEl.innerHTML = '<div class="loading"><span class="spinner dark"></span>Cargando…</div>';
+    allEl.innerHTML = '<div class="loading"><span class="spinner dark"></span>Cargando…</div>';
   }
 
   try {
-    const data2 = await fetchJson(WEB_APP_URL + '?action=listUsers&adminCedula=' + encodeURIComponent(currentUser.cedula));
-    if (!data2.ok) throw new Error(data2.error || 'Error desconocido');
-    renderAllUsers(data2.users);
+    adminCache = await fetchAdminData();
+    paintAdmin(adminCache);
   } catch (err) {
-    allEl.innerHTML = '<div class="empty">' + err.message + '</div>';
+    if (!adminCache) {
+      pendingEl.innerHTML = '<div class="empty">' + escapeHtml(err.message) + '</div>';
+      allEl.innerHTML = '';
+    }
   }
 }
 
@@ -1921,7 +2090,8 @@ async function resolveUser(cedula, action, row) {
   try {
     const data = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action, cedula, adminCedula: currentUser.cedula }) });
     if (!data.ok) throw new Error(data.error || 'Error desconocido');
-    loadAdmin();
+    adminCacheClear();
+    loadAdmin(true);
   } catch (err) {
     alert('No se pudo actualizar: ' + err.message);
     row.style.opacity = '1';

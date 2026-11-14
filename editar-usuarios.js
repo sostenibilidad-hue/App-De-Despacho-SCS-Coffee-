@@ -123,6 +123,7 @@
         .then(function (data) {
           if (!data.ok) throw new Error(data.error || 'No se pudo guardar.');
           var res = data.result;
+          if (typeof adminCacheClear === 'function') adminCacheClear();
           // Actualiza la fila en pantalla sin recargar
           if (u.nameEl) {
             for (var i = 0; i < u.nameEl.childNodes.length; i++) {

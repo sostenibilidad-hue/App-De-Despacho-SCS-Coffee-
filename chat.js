@@ -13,6 +13,7 @@
   app.setAttribute('data-csc-chat', '1');
 
   var LS = 'csc_chat_read:';
+  var lastPollAt = 0;
   var me = null, users = [], msgs = [], seen = {}, lastId = 0;
   var active = 'group', isOpen = false, busy = false, offline = false, filter = '';
   var readTs = {};
@@ -316,7 +317,7 @@
 
   async function poll() {
     if (busy || !me) return;
-    busy = true;
+    busy = true; lastPollAt = Date.now();
     try {
       if (!users.length) await loadUsers();
       var first = lastId === 0 && !msgs.length;
@@ -521,6 +522,6 @@
     var p = hidden ? Promise.resolve() : poll();
     p.then(function () { setTimeout(tick, hidden ? 30000 : (isOpen ? 4000 : 20000)); });
   }
-  document.addEventListener('visibilitychange', function () { if (!document.hidden && me) poll(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && me && Date.now() - lastPollAt > 15000) poll(); });
   tick();
 })();

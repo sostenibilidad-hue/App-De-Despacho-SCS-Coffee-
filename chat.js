@@ -12,7 +12,8 @@
   if (!app || !main || !side || app.getAttribute('data-csc-chat')) return;
   app.setAttribute('data-csc-chat', '1');
 
-  var LS = 'csc_chat_read:';
+  var LS = 'csc_chat_read:', MSG_LS = 'csc_chat_msgs:', USR_LS = 'csc_chat_users:', ASKED_LS = 'csc_notif_asked';
+  var notified = {}, baseline = false, titleBase = document.title, swReg = null, actx = null, toastTimer = null;
   var lastPollAt = 0;
   var myFoto = '', usersAt = 0;
   var me = null, users = [], msgs = [], seen = {}, lastId = 0;
@@ -102,6 +103,14 @@
     '.chat-file .ficon{width:38px;height:38px;border-radius:8px;background:#E9C98C;color:#3D2412;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;text-transform:uppercase;}',
     '.chat-file .fname{font-size:13.5px;font-weight:700;word-break:break-all;line-height:1.25;}',
     '.chat-file .fsub{font-size:11px;opacity:.75;}',
+    '.chat-notif-btn{display:none;width:100%;margin:0 0 10px;padding:8px 10px;border:1px dashed #C9A66B;border-radius:10px;background:#FFF6E3;color:#6B3F1D;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;}',
+    '.chat-notif-btn.show{display:block;}',
+    '.chat-notif-note{display:none;margin:0 0 10px;font-size:11.5px;color:var(--ink-soft);}',
+    '.chat-notif-note.show{display:block;}',
+    '.chat-toast{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));left:50%;transform:translate(-50%,-140%);transition:transform .25s ease;z-index:2000;width:min(92vw,380px);background:#3D2412;color:#fff;border-radius:14px;padding:11px 14px;box-shadow:0 10px 30px rgba(0,0,0,.35);cursor:pointer;display:flex;gap:10px;align-items:center;}',
+    '.chat-toast.show{transform:translate(-50%,0);}',
+    '.chat-toast b{display:block;font-size:13.5px;}',
+    '.chat-toast span{display:block;font-size:12.5px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px;}',
     '@media (max-width:760px){',
     '  .chat-wrap{height:calc(100vh - 110px);height:calc(100dvh - 110px);}',
     '  .chat-list{width:100%;border-right:none;}',
@@ -121,6 +130,8 @@
     '<div class="chat-wrap" id="chatWrap">' +
       '<div class="chat-list">' +
         '<div class="chat-list-head"><h3>Chat del equipo</h3>' +
+        '<button type="button" class="chat-notif-btn" id="chatNotifBtn">\uD83D\uDD14 Activar avisos de mensajes nuevos</button>' +
+        '<div class="chat-notif-note" id="chatNotifNote">Los avisos están bloqueados en este navegador. Actívalos en los permisos del sitio.</div>' +
         '<input class="chat-search" id="chatSearch" type="search" placeholder="Buscar compañero…" autocomplete="off"></div>' +
         '<div class="chat-convs" id="chatConvs"></div>' +
       '</div>' +
@@ -205,6 +216,32 @@
     var n = totalUnread(), b = $('chatBadge');
     b.textContent = n > 99 ? '99+' : String(n);
     b.classList.toggle('show', n > 0);
+    document.title = (n > 0 ? '(' + n + ') ' : '') + titleBase;
+    bellRefresh();
+  }
+
+  /* La campanita (app.js) suma estos mensajes sin leer a sus pendientes. */
+  function bellRefresh() {
+    try {
+      if (typeof renderNotifBadge === 'function') renderNotifBadge();
+      var np = $('notifPanel');
+      if (np && np.classList.contains('open') && typeof renderNotifPanel === 'function') renderNotifPanel();
+    } catch (e) {}
+  }
+  function unreadItems() {
+    if (!me) return [];
+    var out = [];
+    ['group'].concat(users.map(function (u) { return u.cedula; })).forEach(function (c) {
+      var n = unreadOf(c); if (!n) return;
+      var l = lastOf(c), u = c === 'group' ? null : userByCed(c);
+      out.push({
+        conv: c, count: n, ts: l ? l.ts : 0,
+        name: c === 'group' ? 'Equipo CSC' : (u ? u.nombre : 'Usuario'),
+        preview: l ? ((c === 'group' ? String(l.nombre).split(' ')[0] + ': ' : '') + (l.texto || (l.adjNombre ? attLabel(l) : ''))) : ''
+      });
+    });
+    out.sort(function (a, b) { return b.ts - a.ts; });
+    return out;
   }
 
   /* ---------------- Avatares automáticos ----------------
@@ -341,9 +378,27 @@
   }
 
   /* ---------------- Red ---------------- */
-  function api(params) {
+  function api(params, attempts) {
     var q = Object.keys(params).map(function (k) { return k + '=' + enc(params[k]); }).join('&');
-    return fetchJson(WEB_APP_URL + '?' + q);
+    return fetchJson(WEB_APP_URL + '?' + q, undefined, attempts || 1);
+  }
+
+  /* Copia local: al abrir el chat los mensajes y la lista de personas salen al instante. */
+  function saveLocal() {
+    try {
+      var keep = msgs.filter(function (m) { return !m.temp && !m.failed; }).slice(-150);
+      localStorage.setItem(MSG_LS + me, JSON.stringify(keep));
+      if (users.length) localStorage.setItem(USR_LS + me, JSON.stringify({ u: users, f: myFoto }));
+    } catch (e) {}
+  }
+  function loadLocal() {
+    try {
+      var c = JSON.parse(localStorage.getItem(MSG_LS + me) || '[]') || [];
+      c.forEach(function (m) { addMsg(m); });
+      msgs.sort(function (a, b) { return a.ts - b.ts; });
+      var u = JSON.parse(localStorage.getItem(USR_LS + me) || 'null');
+      if (u && u.u && u.u.length) { users = u.u; myFoto = u.f || ''; applyMyPhoto(); }
+    } catch (e) {}
   }
 
   function addMsg(m) {
@@ -367,48 +422,155 @@
     if (busy || !me) return;
     busy = true; lastPollAt = Date.now();
     try {
-      if (!users.length) await loadUsers();
-      else if (Date.now() - usersAt > 120000) {   // cada 2 min se actualizan fotos/usuarios nuevos
-        usersAt = Date.now();
-        try { await loadUsers(); renderList(); if (isOpen) { renderHead(); renderThread(); } } catch (e) {}
-      }
       var first = lastId === 0 && !msgs.length;
-      var d = await api({ action: 'chatList', cedula: me, since: lastId });
+      // Personas y mensajes se piden A LA VEZ (antes eran una petición tras otra).
+      var pu = null;
+      if (!users.length) { pu = loadUsers(); pu.catch(function () {}); }
+      else if (Date.now() - usersAt > 120000) {   // cada 2 min, EN SEGUNDO PLANO: fotos/usuarios nuevos
+        usersAt = Date.now();
+        loadUsers().then(function () { renderList(); if (isOpen) { renderHead(); renderThread(); } saveLocal(); }).catch(function () {});
+      }
+      var pl = api({ action: 'chatList', cedula: me, since: lastId });
+      pl.catch(function () {});
+      if (pu) await pu;
+      var d = await pl;
       if (!d.ok) throw new Error(d.error || 'Error');
       offline = false;
-      var changed = false;
-      (d.messages || []).forEach(function (m) { if (addMsg(m)) changed = true; });
+      var changed = false, incoming = [];
+      (d.messages || []).forEach(function (m) { if (addMsg(m)) { changed = true; if (m.de !== me) incoming.push(m); } });
       msgs.sort(function (a, b) { return a.ts - b.ts; });
       if (first && !localStorage.getItem(LS + me)) {
         // Primera vez en este equipo: el historial anterior no cuenta como "sin leer".
         ['group'].concat(users.map(function (u) { return u.cedula; })).forEach(function (c) { var l = lastOf(c); if (l) readTs[c] = l.ts; });
         saveRead();
+        incoming = [];
       }
-      if (isOpen) { markRead(active); }
-      if (changed || first) { renderList(); if (isOpen) renderThread(); } else renderBadge();
+      if (isOpen && !document.hidden) { markRead(active); }
+      if (changed || first || pu) { renderList(); if (isOpen) renderThread(); saveLocal(); } else renderBadge();
       if (isOpen) renderHead();
+      if (baseline && incoming.length) notifyIncoming(incoming);
+      baseline = true;
     } catch (e) {
       offline = true; if (isOpen) renderHead();
     }
     busy = false;
   }
 
+  /* ---------------- Avisos: sonido, vibración, mensaje flotante y notificación del sistema ---------------- */
+  function unlockAudio() {
+    try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) {}
+  }
+  function beep() {
+    try {
+      unlockAudio();
+      if (actx) {
+        var o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+        o.type = 'sine'; o.frequency.setValueAtTime(880, t); o.frequency.setValueAtTime(1175, t + 0.12);
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+        o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + 0.45);
+      }
+    } catch (e) {}
+    try { if (navigator.vibrate) navigator.vibrate([150, 80, 150]); } catch (e) {}
+  }
+  function convTitle(m) { return m.tipo === 'grupo' ? 'Equipo CSC' : m.nombre; }
+  function msgBody(m) { return (m.tipo === 'grupo' ? String(m.nombre).split(' ')[0] + ': ' : '') + (m.texto || (m.adjNombre ? attLabel(m) : 'Mensaje nuevo')); }
+
+  function showToast(m) {
+    var t = $('chatToast');
+    if (!t) {
+      t = el('div', 'chat-toast'); t.id = 'chatToast';
+      document.body.appendChild(t);
+      t.addEventListener('click', function () { t.classList.remove('show'); if (t._conv) openConv(t._conv); });
+    }
+    t.textContent = '';
+    t.appendChild(el('div', '', '\uD83D\uDCAC'));
+    var box = el('div'); box.appendChild(el('b', '', convTitle(m))); box.appendChild(el('span', '', msgBody(m)));
+    t.appendChild(box);
+    t._conv = convOf(m);
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove('show'); }, 6000);
+  }
+
+  function sysNotify(m) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    var conv = convOf(m), opts = {
+      body: msgBody(m), icon: 'icon-192.png', badge: 'icon-192.png', tag: 'csc-chat-' + conv,
+      renotify: true, vibrate: [200, 100, 200], data: { conv: conv }
+    };
+    var fallback = function () {
+      try { var n = new Notification(convTitle(m), opts); n.onclick = function () { window.focus(); openConv(conv); n.close(); }; } catch (e) {}
+    };
+    if (swReg && swReg.showNotification) swReg.showNotification(convTitle(m), opts).catch(fallback);
+    else fallback();
+  }
+
+  function notifyIncoming(list) {
+    var viewing = isOpen && !document.hidden;
+    var fresh = list.filter(function (m) {
+      if (notified[m.id]) return false;
+      notified[m.id] = 1;
+      return !(viewing && convOf(m) === active);   // si ya está mirando esa conversación, no hace falta avisar
+    });
+    if (!fresh.length) return;
+    var m = fresh[fresh.length - 1];
+    beep();
+    if (document.hidden) sysNotify(m); else showToast(m);
+  }
+
+  /* Permiso para notificaciones del sistema (hay que pedirlo con un toque del usuario). */
+  function notifSupported() { return 'Notification' in window; }
+  function updateNotifUI() {
+    var b = $('chatNotifBtn'), n = $('chatNotifNote');
+    if (!b || !n) return;
+    var perm = notifSupported() ? Notification.permission : 'unsupported';
+    b.classList.toggle('show', perm === 'default');
+    n.classList.toggle('show', perm === 'denied');
+  }
+  function askNotif() {
+    if (!notifSupported() || Notification.permission !== 'default') { updateNotifUI(); return; }
+    try {
+      var r = Notification.requestPermission(function () { updateNotifUI(); });
+      if (r && r.then) r.then(updateNotifUI);
+    } catch (e) {}
+  }
+  $('chatNotifBtn').addEventListener('click', function () { unlockAudio(); askNotif(); });
+  // Primer toque tras iniciar sesión: desbloquea el sonido y pide permiso (una sola vez por equipo).
+  document.addEventListener('pointerup', function () {
+    if (!me) return;
+    unlockAudio();
+    var asked = false; try { asked = !!localStorage.getItem(ASKED_LS); } catch (e) {}
+    if (!asked && notifSupported() && Notification.permission === 'default') {
+      try { localStorage.setItem(ASKED_LS, '1'); } catch (e) {}
+      askNotif();
+    }
+  }, { passive: true });
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then(function (r) { swReg = r; return navigator.serviceWorker.ready; })
+      .then(function (r) { swReg = r; }).catch(function () {});
+    navigator.serviceWorker.addEventListener('message', function (e) {
+      if (e.data && e.data.cscOpenChat) openConv(e.data.conv);
+    });
+  }
+
   async function send(texto, tempMsg, fileData) {
     var tipo = active === 'group' ? 'grupo' : 'directo';
     var temp = tempMsg;
     if (!temp) {
-      temp = { id: 'tmp' + Date.now(), ts: Date.now(), de: me, nombre: currentUser.nombre, tipo: tipo, para: tipo === 'directo' ? active : '', texto: texto, temp: true };
+      temp = { id: 'tmp' + Date.now(), cid: Date.now().toString(36) + Math.random().toString(36).slice(2, 8), ts: Date.now(), de: me, nombre: currentUser.nombre, tipo: tipo, para: tipo === 'directo' ? active : '', texto: texto, temp: true };
       if (fileData) { temp.file = fileData; temp.adjNombre = fileData.filename; temp.preview = fileData.preview || ''; }
       msgs.push(temp);
     } else { temp.failed = false; temp.temp = true; }
     renderList(); renderThread(true);
     try {
-      var d = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action: 'chatSend', cedula: me, tipo: temp.tipo, para: temp.para, texto: temp.texto, file: temp.file ? { base64: temp.file.base64, mimeType: temp.file.mimeType, filename: temp.file.filename } : undefined }) }, 2);
+      var d = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action: 'chatSend', cedula: me, cid: temp.cid, tipo: temp.tipo, para: temp.para, texto: temp.texto, file: temp.file ? { base64: temp.file.base64, mimeType: temp.file.mimeType, filename: temp.file.filename } : undefined }) }, 2);
       if (!d.ok) throw new Error(d.error || 'Error');
       msgs = msgs.filter(function (m) { return m !== temp; });
       addMsg(d.message);
       msgs.sort(function (a, b) { return a.ts - b.ts; });
       markRead(convOf(d.message));
+      saveLocal();
     } catch (e) {
       temp.temp = false; temp.failed = true;
       if (e && /archivo|tipo|MB/i.test(String(e.message))) temp.errMsg = String(e.message);
@@ -542,6 +704,12 @@
     inThread(false); renderList(); renderHead(); renderThread(true); poll();
   }
   navChat.addEventListener('click', openChat);
+  function openConv(conv) {
+    if (!me) return;
+    if (!isOpen) openChat();
+    selectConv(conv || 'group');
+  }
+  window.cscChat = { unreadItems: unreadItems, open: openConv };
 
   // Cualquier otro botón del menú (o el "volver" flotante) cierra el chat primero.
   side.addEventListener('click', function (e) {
@@ -638,24 +806,31 @@
     if (isOpen) { isOpen = false; panel.style.display = 'none'; navChat.classList.remove('active'); }
     me = null; users = []; msgs = []; seen = {}; lastId = 0; readTs = {}; active = 'group'; offline = false;
     myFoto = ''; usersAt = 0; applyMyPhoto();
+    notified = {}; baseline = false; document.title = titleBase; bellRefresh();
     clearAttach(); closeEmoji();
     $('chatBadge').classList.remove('show');
-    try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf(LS) === 0) localStorage.removeItem(k); }); } catch (e) {}
+    try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf(LS) === 0 || k.indexOf(MSG_LS) === 0 || k.indexOf(USR_LS) === 0) localStorage.removeItem(k); }); } catch (e) {}
   }
 
   function tick() {
     var cu = (typeof currentUser !== 'undefined') ? currentUser : null;
     var ced = cu && cu.cedula ? String(cu.cedula).trim() : null;
-    if (!ced) { if (me) resetSession(); setTimeout(tick, 2000); return; }
+    if (!ced) { if (me) resetSession(); setTimeout(tick, 700); return; }
     if (ced !== me) {
       if (me) resetSession();
       me = ced;
       try { readTs = JSON.parse(localStorage.getItem(LS + me) || '{}') || {}; } catch (e) { readTs = {}; }
+      loadLocal(); renderList(); updateNotifUI();
     }
     var hidden = document.hidden;
-    var p = hidden ? Promise.resolve() : poll();
-    p.then(function () { setTimeout(tick, hidden ? 30000 : (isOpen ? 4000 : 20000)); });
+    // También en segundo plano se consulta (más espaciado) para poder avisar de mensajes nuevos.
+    poll().then(function () { setTimeout(tick, hidden ? 20000 : (isOpen ? 3000 : 8000)); });
   }
-  document.addEventListener('visibilitychange', function () { if (!document.hidden && me && Date.now() - lastPollAt > 15000) poll(); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden || !me) return;
+    if (isOpen) { markRead(active); renderList(); }
+    if (Date.now() - lastPollAt > 2000) poll();
+    updateNotifUI();
+  });
   tick();
 })();

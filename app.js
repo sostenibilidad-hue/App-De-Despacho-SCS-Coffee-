@@ -698,6 +698,15 @@ function showApp() {
   refreshHubCounts();
 }
 
+/* En el celular, un usuario que NO es administrador no tiene panel de control: su
+ * "Inicio" quedaba en blanco. Para ellos la app abre directo en Módulos > Datos
+ * (Nuevo reporte), que es lo primero que necesitan. */
+function isPhoneNonAdmin() {
+  try {
+    return !!currentUser && currentUser.rol !== 'admin' && window.matchMedia('(max-width:899px)').matches;
+  } catch (e) { return false; }
+}
+
 /* Autocompleta "Responsable del despacho" con el nombre de quien inició
  * sesión (es quien está reportando). Solo llena si el campo está vacío,
  * así no pisa el valor cuando se está EDITANDO un reporte de otra persona
@@ -879,14 +888,21 @@ function updateExtraFilesUI() {
 }
 
 function showSection(name) {
+  if (name === 'hub' && isPhoneNonAdmin()) name = 'group';   // nunca dejar el inicio vacío
   document.getElementById('panel-hub').style.display = name === 'hub' ? 'block' : 'none';
   document.getElementById('panel-group').style.display = name === 'group' ? 'block' : 'none';
   document.getElementById('panel-admin').style.display = name === 'admin' ? 'block' : 'none';
   const floatBtn = document.getElementById('floatingBack');
-  if (floatBtn) floatBtn.classList.toggle('show', name !== 'hub');
+  if (floatBtn) floatBtn.classList.toggle('show', name !== 'hub' && !isPhoneNonAdmin());
 }
 
 function goToHub() {
+  if (isPhoneNonAdmin()) {            // celular sin panel de control: abre Datos > Nuevo reporte
+    if (currentGroup !== GROUP || document.getElementById('panel-group').style.display === 'none') openGroup(GROUP);
+    else showSection('group');
+    refreshHubCounts();
+    return;
+  }
   currentGroup = null;
   showSection('hub');
   refreshHubCounts();
@@ -957,11 +973,16 @@ function allPendingPhotos() {
   return Object.keys(pendingPhotosCache).reduce((acc, g) => acc.concat(pendingPhotosCache[g] || []), []);
 }
 
+/* Conversaciones del chat con mensajes sin leer (las aporta chat.js). */
+function chatNotifItems() {
+  try { return (window.cscChat && window.cscChat.unreadItems()) || []; } catch (e) { return []; }
+}
+
 function renderNotifBadge() {
   const badge = document.getElementById('notifBadge');
   const btn = document.getElementById('notifBtn');
   if (!badge || !btn) return;
-  const total = allPendingPhotos().length;
+  const total = allPendingPhotos().length + chatNotifItems().reduce((a, c) => a + c.count, 0);
   if (total > 0) {
     badge.textContent = total > 99 ? '99+' : String(total);
     badge.style.display = 'flex';
@@ -1029,16 +1050,42 @@ function renderNotifPanel() {
   const panel = document.getElementById('notifPanel');
   if (!panel) return;
   const all = allPendingPhotos();
+  const chats = chatNotifItems();
 
-  if (!all.length) {
-    panel.innerHTML = '<div class="notif-empty">🎉 Todos los reportes tienen fotos.</div>';
+  if (!all.length && !chats.length) {
+    panel.innerHTML = '<div class="notif-empty">🎉 Sin pendientes: no hay mensajes nuevos y todos los reportes tienen fotos.</div>';
     return;
   }
 
-  panel.innerHTML =
-    '<div class="notif-title">Pendientes de fotos (' + all.length + ')</div>' +
-    '<div class="notif-list"></div>';
+  panel.innerHTML = '<div class="notif-list"></div>';
   const listEl = panel.querySelector('.notif-list');
+  if (chats.length) {
+    const t = document.createElement('div');
+    t.className = 'notif-title';
+    t.textContent = 'Mensajes nuevos (' + chats.reduce((a, c) => a + c.count, 0) + ')';
+    listEl.appendChild(t);
+    chats.forEach(c => {
+      const row = document.createElement('div');
+      row.className = 'notif-item';
+      row.innerHTML =
+        '<div style="min-width:0;">' +
+          '<div class="notif-item-plate" style="letter-spacing:0;">💬 ' + escapeHtml(c.name) + '</div>' +
+          '<div class="notif-item-meta">' + escapeHtml(c.preview) + '</div>' +
+        '</div>' +
+        '<span class="notif-count">' + (c.count > 99 ? '99+' : c.count) + '</span>';
+      row.addEventListener('click', () => {
+        panel.classList.remove('open');
+        if (window.cscChat) window.cscChat.open(c.conv);
+      });
+      listEl.appendChild(row);
+    });
+  }
+  if (all.length) {
+    const t = document.createElement('div');
+    t.className = 'notif-title';
+    t.textContent = 'Pendientes de fotos (' + all.length + ')';
+    listEl.appendChild(t);
+  }
   all.forEach(item => {
     const row = document.createElement('div');
     row.className = 'notif-item';

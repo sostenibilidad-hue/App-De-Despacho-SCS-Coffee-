@@ -14,6 +14,7 @@
 
   var LS = 'csc_chat_read:';
   var lastPollAt = 0;
+  var myFoto = '', usersAt = 0;
   var me = null, users = [], msgs = [], seen = {}, lastId = 0;
   var active = 'group', isOpen = false, busy = false, offline = false, filter = '';
   var readTs = {};
@@ -37,6 +38,14 @@
     '.chat-conv.active{background:#EBDCC8;}',
     '.chat-av{width:40px;height:40px;border-radius:50%;background:var(--navy);color:#fff;font-weight:800;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}',
     '.chat-av.grp{background:#E9C98C;color:var(--navy-deep);}',
+    '.chat-av{background-size:cover;background-position:center;}',
+    '#cscAvatar{cursor:pointer;background-size:cover;background-position:center;}',
+    '.csc-photo-actions{display:flex;gap:12px;margin-top:3px;}',
+    '.csc-photo-actions button{background:none;border:none;padding:0;color:#E9C98C;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;text-decoration:underline;text-underline-offset:2px;}',
+    '.csc-photo-actions button:disabled{opacity:.6;cursor:default;}',
+    '.chat-av.adm{box-shadow:0 0 0 2px #fff,0 0 0 4px #E9C98C;}',
+    '.chat-av.sm{width:22px;height:22px;font-size:10px;font-weight:800;}',
+    '.chat-av.sm.adm{box-shadow:0 0 0 1.5px #fff,0 0 0 3px #E9C98C;}',
     '.chat-conv-body{flex:1;min-width:0;}',
     '.chat-conv-name{font-size:14.5px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
     '.chat-conv-last{font-size:12.5px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
@@ -56,7 +65,7 @@
     '.chat-msg.other{align-self:flex-start;background:#fff;color:var(--ink);border-bottom-left-radius:4px;}',
     '.chat-msg.pending{opacity:.6;}',
     '.chat-msg.failed{background:var(--err-bg);color:var(--err);}',
-    '.chat-who{font-size:12px;font-weight:800;color:var(--indigo-light);margin-bottom:2px;}',
+    '.chat-who{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:800;color:var(--indigo-light);margin-bottom:4px;}',
     '.chat-time{font-size:10.5px;opacity:.7;text-align:right;margin-top:2px;white-space:nowrap;}',
     '.chat-empty{margin:auto;color:var(--ink-soft);font-size:14px;text-align:center;padding:20px;}',
     '.chat-form{display:flex;gap:10px;align-items:flex-end;padding:12px 14px;border-top:1px solid var(--line);background:#fff;}',
@@ -198,11 +207,42 @@
     b.classList.toggle('show', n > 0);
   }
 
+  /* ---------------- Avatares automáticos ----------------
+   * Cada persona recibe siempre el mismo color (según su cédula) y sus iniciales.
+   * Los administradores llevan un aro dorado. */
+  var AV_COLORS = ['#6B3F1D', '#2F6B4F', '#8A3B3B', '#3A5A8C', '#7A4F9A', '#A05A12', '#2E7D7A', '#9A4A6B', '#5B6B2E', '#4A4F7A'];
+  function avHash(str) { var h = 0; str = String(str || ''); for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0; return h; }
+  function initialsOf(name) {
+    var w = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (!w.length) return '?';
+    return (w[0].charAt(0) + (w.length > 1 ? w[w.length - 1].charAt(0) : '')).toUpperCase();
+  }
+  function photoUrl(id) { return 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(id) + '&sz=w128'; }
+  /* Pinta un avatar: grupo (👥) o persona (iniciales + color propio). */
+  function paintAv(node, ced, name, isGroup, small) {
+    var u = ced ? userByCed(ced) : null;
+    var admin = !!(u && u.rol === 'admin');
+    node.className = 'chat-av' + (isGroup ? ' grp' : '') + (small ? ' sm' : '') + (admin && !isGroup ? ' adm' : '');
+    node.style.backgroundImage = '';
+    if (isGroup) { node.textContent = '👥'; node.style.background = ''; node.style.color = ''; return node; }
+    node.textContent = initialsOf(name || (u && u.nombre));
+    node.style.background = AV_COLORS[avHash(ced || name) % AV_COLORS.length];
+    node.style.color = '#fff';
+    // Foto de perfil (si la persona subió una): va encima del color; si no, queda el avatar automático.
+    var foto = (ced && ced === me) ? myFoto : (u && u.foto) || '';
+    if (foto) {
+      node.style.backgroundImage = 'url(' + photoUrl(foto) + ')';
+      node.style.backgroundSize = 'cover'; node.style.backgroundPosition = 'center';
+      node.style.color = 'transparent';
+    }
+    return node;
+  }
+
   function convRow(conv, name, sub, grp) {
     var last = lastOf(conv), un = unreadOf(conv);
     var row = el('button', 'chat-conv' + (conv === active ? ' active' : ''));
     row.type = 'button';
-    row.appendChild(el('div', 'chat-av' + (grp ? ' grp' : ''), grp ? '👥' : name.charAt(0).toUpperCase()));
+    row.appendChild(paintAv(el('div', 'chat-av'), grp ? null : conv, name, grp));
     var body = el('div', 'chat-conv-body');
     body.appendChild(el('div', 'chat-conv-name', name));
     var preview = last ? ((last.de === me ? 'Tú: ' : (grp ? last.nombre.split(' ')[0] + ': ' : '')) + (last.texto || (last.adjNombre ? attLabel(last) : ''))) : sub;
@@ -233,12 +273,12 @@
   function renderHead() {
     var av = $('chatHeadAv');
     if (active === 'group') {
-      av.className = 'chat-av grp'; av.textContent = '👥';
+      paintAv(av, null, '', true);
       $('chatHeadName').textContent = 'Equipo CSC';
       $('chatHeadSub').textContent = 'Todos los usuarios autorizados';
     } else {
       var u = userByCed(active);
-      av.className = 'chat-av'; av.textContent = u ? u.nombre.charAt(0).toUpperCase() : '?';
+      paintAv(av, active, u ? u.nombre : '', false);
       $('chatHeadName').textContent = u ? u.nombre : 'Usuario';
       $('chatHeadSub').textContent = 'Mensaje individual';
     }
@@ -259,7 +299,12 @@
       if (dk !== prevDay) { box.appendChild(el('div', 'chat-day', dayLabel(m.ts))); prevDay = dk; }
       var mine = m.de === me;
       var b = el('div', 'chat-msg ' + (mine ? 'me' : 'other') + (m.temp ? ' pending' : '') + (m.failed ? ' failed' : ''));
-      if (!mine && active === 'group') b.appendChild(el('div', 'chat-who', m.nombre));
+      if (!mine && active === 'group') {
+        var who = el('div', 'chat-who');
+        who.appendChild(paintAv(el('div', 'chat-av'), m.de, m.nombre, false, true));
+        who.appendChild(el('span', '', m.nombre));
+        b.appendChild(who);
+      }
       if (m.adjNombre) {
         var isImg = isImgName(m.adjNombre);
         var viewUrl = m.adjId ? 'https://drive.google.com/file/d/' + m.adjId + '/view' : '';
@@ -313,6 +358,9 @@
     var d = await api({ action: 'chatUsers', cedula: me });
     if (!d.ok) throw new Error(d.error || 'Error');
     users = d.users || [];
+    usersAt = Date.now();
+    myFoto = (d.me && d.me.foto) || '';
+    applyMyPhoto();
   }
 
   async function poll() {
@@ -320,6 +368,10 @@
     busy = true; lastPollAt = Date.now();
     try {
       if (!users.length) await loadUsers();
+      else if (Date.now() - usersAt > 120000) {   // cada 2 min se actualizan fotos/usuarios nuevos
+        usersAt = Date.now();
+        try { await loadUsers(); renderList(); if (isOpen) { renderHead(); renderThread(); } } catch (e) {}
+      }
       var first = lastId === 0 && !msgs.length;
       var d = await api({ action: 'chatList', cedula: me, since: lastId });
       if (!d.ok) throw new Error(d.error || 'Error');
@@ -500,10 +552,92 @@
     if (e.target.closest && e.target.closest('#floatingBack')) closeChat();
   }, true);
 
+  /* ---------------- Mi foto de perfil ---------------- */
+  var photoBtn = null, photoDel = null, photoInput = null;
+  (function buildPhotoUI() {
+    var sub = side.querySelector('.csc-user-sub');
+    if (!sub) return;
+    var box = document.createElement('div');
+    box.className = 'csc-photo-actions';
+    photoBtn = document.createElement('button'); photoBtn.type = 'button'; photoBtn.textContent = 'Cambiar foto';
+    photoDel = document.createElement('button'); photoDel.type = 'button'; photoDel.textContent = 'Quitar'; photoDel.style.display = 'none';
+    box.appendChild(photoBtn); box.appendChild(photoDel);
+    sub.parentNode.appendChild(box);
+    photoInput = document.createElement('input');
+    photoInput.type = 'file'; photoInput.accept = 'image/*'; photoInput.style.display = 'none';
+    document.body.appendChild(photoInput);
+    var pick = function () { if (me) photoInput.click(); };
+    photoBtn.addEventListener('click', pick);
+    var av = $('cscAvatar'); if (av) { av.title = 'Cambiar foto de perfil'; av.addEventListener('click', pick); }
+    photoInput.addEventListener('change', function () {
+      var file = photoInput.files && photoInput.files[0];
+      photoInput.value = '';
+      if (file) changePhoto(file);
+    });
+    photoDel.addEventListener('click', removePhoto);
+  })();
+
+  /* Recorta al centro (cuadrado) y reduce a 256 px: pesa ~20 KB y sube al instante. */
+  function squarePhoto(file) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image(), url = URL.createObjectURL(file);
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var sz = Math.min(img.width, img.height), sx = (img.width - sz) / 2, sy = (img.height - sz) / 2;
+        var c = document.createElement('canvas'); c.width = c.height = 256;
+        c.getContext('2d').drawImage(img, sx, sy, sz, sz, 0, 0, 256, 256);
+        resolve({ base64: c.toDataURL('image/jpeg', 0.85).split(',')[1], mimeType: 'image/jpeg', filename: 'perfil.jpg' });
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('No se pudo leer esa imagen.')); };
+      img.src = url;
+    });
+  }
+
+  function applyMyPhoto() {
+    var av = $('cscAvatar');
+    if (av) {
+      if (myFoto) { av.style.backgroundImage = 'url(' + photoUrl(myFoto) + ')'; av.style.color = 'transparent'; }
+      else { av.style.backgroundImage = ''; av.style.color = ''; }
+    }
+    if (photoBtn) photoBtn.textContent = myFoto ? 'Cambiar foto' : 'Subir foto';
+    if (photoDel) photoDel.style.display = myFoto ? '' : 'none';
+  }
+
+  function repaintAll() { renderList(); renderHead(); if (isOpen) renderThread(); }
+
+  async function changePhoto(file) {
+    var label = photoBtn ? photoBtn.textContent : '';
+    if (photoBtn) { photoBtn.disabled = true; photoBtn.textContent = 'Subiendo…'; }
+    try {
+      var f = await squarePhoto(file);
+      var d = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action: 'chatSetPhoto', cedula: me, file: f }) }, 2);
+      if (!d.ok) throw new Error(d.error || 'Error');
+      myFoto = (d.result && d.result.foto) || '';
+      applyMyPhoto(); repaintAll();
+    } catch (e) {
+      window.alert('No se pudo guardar la foto: ' + (e.message || e));
+      if (photoBtn) photoBtn.textContent = label;
+    }
+    if (photoBtn) photoBtn.disabled = false;
+    applyMyPhoto();
+  }
+
+  async function removePhoto() {
+    if (!window.confirm('¿Quitar tu foto de perfil? Volverá tu avatar con iniciales.')) return;
+    if (photoDel) photoDel.disabled = true;
+    try {
+      var d = await fetchJson(WEB_APP_URL, { method: 'POST', body: JSON.stringify({ action: 'chatRemovePhoto', cedula: me }) }, 2);
+      if (!d.ok) throw new Error(d.error || 'Error');
+      myFoto = ''; applyMyPhoto(); repaintAll();
+    } catch (e) { window.alert('No se pudo quitar la foto: ' + (e.message || e)); }
+    if (photoDel) photoDel.disabled = false;
+  }
+
   /* ---------------- Sesión y ciclo de consulta ---------------- */
   function resetSession() {
     if (isOpen) { isOpen = false; panel.style.display = 'none'; navChat.classList.remove('active'); }
     me = null; users = []; msgs = []; seen = {}; lastId = 0; readTs = {}; active = 'group'; offline = false;
+    myFoto = ''; usersAt = 0; applyMyPhoto();
     clearAttach(); closeEmoji();
     $('chatBadge').classList.remove('show');
     try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf(LS) === 0) localStorage.removeItem(k); }); } catch (e) {}
